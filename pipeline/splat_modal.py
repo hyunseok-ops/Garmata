@@ -16,22 +16,47 @@ import time
 import modal
 
 NERFSTUDIO_TAG = "1.1.5"  # ponytail: pinned by tag; bump deliberately after re-running the pilot
-image = modal.Image.from_registry(f"ghcr.io/nerfstudio-project/nerfstudio:{NERFSTUDIO_TAG}", add_python="3.10").pip_install("requests")
+image = (
+    modal.Image.from_registry(f"ghcr.io/nerfstudio-project/nerfstudio:{NERFSTUDIO_TAG}", add_python="3.10")
+    .pip_install("requests")
+    # DISK + LightGlue (Apache-2) for wide-baseline matching; the image's hloc lacks SuperGlue and SuperGlue is non-commercial anyway.
+    # --no-deps: a plain install drags in newer torch/pycolmap and breaks the image's hloc; kornia is LightGlue's only missing dep.
+    # hloc 1.4 (in the image) calls pycolmap.verify_matches with keyword args; pycolmap >= 0.5 wants a TwoViewGeometryOptions object.
+    # /usr/bin/python3 is the interpreter behind ns-process-data; Modal's add_python puts a second Python on PATH.
+    .run_commands("/usr/bin/python3 -m pip install --no-deps kornia kornia_rs pycolmap==0.4.0 https://github.com/cvg/LightGlue/archive/refs/heads/main.zip")
+)
 app = modal.App("garage-intelligence-splat", image=image)
 vol = modal.Volume.from_name("gi-splats", create_if_missing=True)
 DATA = pathlib.Path("/data")
 
 
+LOG_DIR: pathlib.Path | None = None
+
+
 def sh(cmd: list[str], cwd: pathlib.Path | None = None) -> None:
+    """Run a step; tee its output to <job>/logs/<tool>.log on the volume so failures survive Modal's short log window."""
     print("$", " ".join(cmd), flush=True)
-    subprocess.run(cmd, cwd=cwd, check=True)
+    log = (LOG_DIR / f"{cmd[0]}.log") if LOG_DIR else None
+    proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if log:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(proc.stdout)
+        vol.commit()
+    print(proc.stdout[-4000:], flush=True)
+    if proc.returncode:
+        raise RuntimeError(f"{cmd[0]} failed ({proc.returncode}); tail:\n{proc.stdout[-1500:]}")
 
 
 # ponytail: one function per GPU tier; Modal picks the class at definition time, not per call.
-def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations: int, gpu: str) -> dict:
+MIN_FRAMES = 15  # below this a splat is not worth GPU time; report alignment and stop
+
+
+def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations: int, gpu: str, matcher: str = "sift") -> dict:
     import requests
 
+    global LOG_DIR
     root = DATA / "jobs" / job
+    LOG_DIR = root / "logs"
     images, processed, outputs, export = root / "images", root / "processed", root / "outputs", root / "export"
     stats: dict = {"job": job, "nerfstudio": NERFSTUDIO_TAG, "gpu": gpu, "iterations": iterations}
     t0 = time.time()
@@ -87,8 +112,10 @@ def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations
             dst = images / f"{i:04d}.jpg"
             if not dst.exists():
                 dst.write_bytes(requests.get(url, timeout=120).content)
-        # Listing photos are unordered, so match every pair; fine for a few hundred images.
-        sh(["ns-process-data", "images", "--data", str(images), "--output-dir", str(processed), "--matching-method", "exhaustive"])
+        # Listing photos are unordered, so match every pair. "lightglue" = hloc DISK+LightGlue: far more tolerant of
+        # wide baselines and zoom changes than SIFT, which is what scattered listing photos need.
+        extra = ["--sfm-tool", "hloc", "--feature-type", "disk", "--matcher-type", "disk+lightglue"] if matcher == "lightglue" else []
+        sh(["ns-process-data", "images", "--data", str(images), "--output-dir", str(processed), "--matching-method", "exhaustive", *extra])
         stats["source"] = f"{len(image_urls)} images"
     vol.commit()
     stats["seconds_process"] = round(time.time() - t0)
@@ -97,6 +124,12 @@ def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations
         stats["frames_aligned"] = len(json.loads((processed / "transforms.json").read_text())["frames"])
     else:
         stats["frames_aligned"] = len(list(next(processed.glob("images*")).glob("*")))
+
+    if stats["frames_aligned"] < MIN_FRAMES:
+        stats["outcome"] = f"unsuitable: only {stats['frames_aligned']} frames aligned (< {MIN_FRAMES}); not training"
+        (root / "stats.json").write_text(json.dumps(stats, indent=2))
+        vol.commit()
+        return stats
 
     t1 = time.time()
     # Only runs with a checkpoint count; earlier crashed attempts leave config-only folders behind.
@@ -117,17 +150,38 @@ def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations
 
 
 @app.function(gpu="A10G", timeout=3 * 3600, volumes={str(DATA): vol})
-def reconstruct(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000) -> dict:
-    return _reconstruct(job, image_urls, video, iterations, "A10G")
+def reconstruct(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift") -> dict:
+    return _reconstruct(job, image_urls, video, iterations, "A10G", matcher)
 
 
 @app.function(gpu="H100", timeout=3 * 3600, volumes={str(DATA): vol})
-def reconstruct_fast(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000) -> dict:
-    return _reconstruct(job, image_urls, video, iterations, "H100")
+def reconstruct_fast(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift") -> dict:
+    return _reconstruct(job, image_urls, video, iterations, "H100", matcher)
+
+
+@app.function(gpu="A10G", timeout=600)
+def sfm_versions() -> str:
+    """Versions of the SfM stack as seen by the interpreter that runs ns-process-data (not Modal's added Python)."""
+    import subprocess as sp
+
+    shebang = pathlib.Path(sp.run(["which", "ns-process-data"], capture_output=True, text=True).stdout.strip()).read_text().split("\n")[0]
+    py = shebang.lstrip("#!").strip()
+    code = ("import importlib.metadata as m\n"
+            "print({n: (lambda: m.version(n))() if True else 0 for n in []})\n"
+            "out={}\n"
+            "for n in ['nerfstudio','hloc','pycolmap','lightglue','kornia','torch','numpy']:\n"
+            "    try: out[n]=m.version(n)\n"
+            "    except Exception: out[n]='missing'\n"
+            "print(out)")
+    r = sp.run([py, "-c", code], capture_output=True, text=True)
+    return f"python={py} {r.stdout.strip()} {r.stderr.strip()[-200:]}"
 
 
 @app.local_entrypoint()
-def main(job: str = "", urls: str = "", video: bool = False, iterations: int = 15000, gpu: str = "A10G", wait: str = ""):
+def main(job: str = "", urls: str = "", video: bool = False, iterations: int = 15000, gpu: str = "A10G", wait: str = "", matcher: str = "sift", versions: bool = False):
+    if versions:
+        print(modal.Function.from_name(app.name, "sfm_versions").remote())
+        return
     """Deploy once (`modal deploy`), then spawn: the call outlives this client, which laptops on flaky networks need.
 
       uvx modal deploy pipeline/splat_modal.py
@@ -140,6 +194,6 @@ def main(job: str = "", urls: str = "", video: bool = False, iterations: int = 1
     assert job, "--job required"
     image_urls = json.loads(pathlib.Path(urls).read_text()) if urls else None
     name = "reconstruct_fast" if gpu.upper() == "H100" else "reconstruct"
-    call = modal.Function.from_name(app.name, name).spawn(job, image_urls, video, iterations)
+    call = modal.Function.from_name(app.name, name).spawn(job, image_urls, video, iterations, matcher)
     print("spawned", call.object_id)
     print(f"follow: uvx modal run pipeline/splat_modal.py --wait {call.object_id}")

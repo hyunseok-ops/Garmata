@@ -18,6 +18,11 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
   await wait(4000);
   await shot("2-listing");
   await js(`[...document.querySelectorAll('header button')].find(b => b.textContent === 'Edit tags')?.click()`);
+  await wait(9000);
+  await js(`document.querySelector('.parts button')?.click()`); // first tag: moves the camera to its saved pose
+  await wait(3000);
+  await shot("2b-first-tag");
+  await js(`[...document.querySelectorAll('header button')].find(b => b.textContent === 'Edit tags')?.click()`);
   await wait(12000); // GLB + HDRI load
   await shot("3-editor");
   const summary = await js(`({ items: document.querySelectorAll('.browser li').length, photos: document.querySelectorAll('.photos img').length, specs: document.querySelectorAll('dl dt').length, state: document.querySelector('.viewport-state')?.textContent ?? null, title: document.querySelector('.viewer header .title')?.textContent ?? null })`);
