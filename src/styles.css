@@ -71,3 +71,6 @@ dd { margin: 0; text-align: right; }
 .parts { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 4px; }
 .parts button { width: 100%; text-align: left; display: flex; justify-content: space-between; }
 .settings { padding: 24px; grid-column: span 3; }
+
+.mini { width: 44px; height: 30px; object-fit: cover; border-radius: 3px; }
+.photos img { cursor: zoom-in; }

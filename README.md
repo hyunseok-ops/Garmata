@@ -25,6 +25,22 @@ npm run build      # typecheck + renderer/main bundles
 | 4 Generation + review | Stubbed. `requestGeneration` creates a queued version and refuses to duplicate a live job or replace an approved one. No worker, storage, or reviewer UI. |
 | 5 Pilot packaging | Not started. No electron-builder config. |
 
+## Splat pilot (docs/PLAN-SPLAT.md)
+
+Photo-real path: Nerfstudio Splatfacto on Modal, rendered in the viewer with Spark (MIT). `pipeline/splat_modal.py` runs `ns-process-data` + `ns-train splatfacto` + `ns-export gaussian-splat` on an A10G against the `gi-splats` Volume.
+
+```sh
+uvx modal run --detach pipeline/splat_modal.py --job <job> --urls pipeline/inputs/<listing>.json   # sparse-photo baseline
+uvx modal volume put gi-splats walkaround.mp4 /jobs/<job>/source.mp4                              # guided capture (Phase 0)
+uvx modal run --detach pipeline/splat_modal.py --job <job> --video
+uvx modal volume get gi-splats /jobs/<job>/export/splat.ply ./splat.ply
+GI_IMPORT=<listingId>,./splat.ply,splatfacto-1.1.5 npx electron dist-electron/main.js              # register as a pending asset version
+```
+
+Status (2026-09-25): sparse-photo baseline on the 2009 Pierce Velocity (74 listing photos, exhaustive matching) aligned **2 of 74** frames; job cancelled before training. Pipeline then proven end to end on the Tanks & Temples "truck" walkaround (`--job sample-truck`, 251 posed frames): 15k Splatfacto iterations in ~6 min on an A10G, 142 MB `.ply`, loads and orbits in the app (imported as an illustrative asset on listing 226894 with a stored `transform`). Listing photos are scattered viewpoints, mixed focal lengths and close-ups, so COLMAP cannot chain them. This is the outcome the plan's decision gate anticipated: the next input must be a guided walkaround video (Phase 0), uploaded to the volume and run with `--video`. Tag occlusion does not work against splats (no mesh); proxy mesh is the planned fix.
+
+Operational notes: image build is cached after the first deploy; run jobs via `modal deploy` + spawn (the `--wait` flow above) because `modal run` ties the job to the client connection, and this laptop's Wi-Fi drops long-lived streams (a phone hotspot held).
+
 ## Layout
 
 ```

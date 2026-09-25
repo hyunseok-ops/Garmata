@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Listing3DAsset, Listing3DTag, ListingDetail, ListingSummary, TagCategory, Vec3 } from "./data/types.ts";
 import { TAG_CATEGORIES } from "./data/types.ts";
-import { fixtureApi as api } from "./data/fixtures.ts";
+import { fixtureApi } from "./data/fixtures.ts";
+import { desktop } from "./data/garageApi.ts";
+import { CATEGORY_VIEWS, VIEW_LABELS, pickGenerationPhotos } from "./data/photos.ts";
 import { addTag, deleteTag, updateTag } from "./data/tags.ts";
 import Viewer, { PRESETS, validateAssetUrl, type Pose } from "./viewer/Viewer.tsx";
 
 type Feature = "3d" | "settings";
+
+// Desktop shell = live Garage data via the main process; plain browser = offline fixtures.
+const api = desktop ?? fixtureApi;
 
 const REPRESENTATION_LABEL = { illustrative: "Illustrative model", reconstructed: "Reconstructed from listing photos" } as const;
 const STATUS_LABEL = { none: "No 3D", queued: "Queued", processing: "Processing", ready: "Ready", failed: "Failed" } as const;
@@ -23,6 +28,24 @@ export default function App() {
   const [placing, setPlacing] = useState(false);
   const [pose, setPose] = useState<Pose | null>(null);
   const [capturePose, setCapturePose] = useState<(() => Pose) | null>(null);
+  const [status, setStatus] = useState<{ garage: boolean; provider: boolean }>({ garage: false, provider: false });
+  const [genError, setGenError] = useState<string | null>(null);
+
+  useEffect(() => void desktop?.status().then(setStatus), []);
+
+  // Poll while a job is live so the header and list reflect provider progress.
+  useEffect(() => {
+    if (!asset || !listing || (asset.processingStatus !== "queued" && asset.processingStatus !== "processing")) return;
+    const t = setInterval(async () => {
+      const a = await api.getCurrentAsset(listing.id);
+      if (a && (a.processingStatus !== asset.processingStatus || a.id !== asset.id)) {
+        setAsset(a);
+        setTags(await api.listTags(a.id));
+        setResults(await api.searchListings(query));
+      }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [asset, listing, query]);
 
   useEffect(() => void api.searchListings(query).then(setResults), [query]);
 
@@ -51,10 +74,24 @@ export default function App() {
 
   const generate = async () => {
     if (!listing) return;
-    const a = await api.requestGeneration(listing.id);
-    setAsset(a);
-    setResults(await api.searchListings(query));
+    setGenError(null);
+    try {
+      const a = await api.requestGeneration(listing.id);
+      setAsset(a);
+      setTags(await api.listTags(a.id));
+      setResults(await api.searchListings(query));
+    } catch (e) {
+      setGenError((e as Error).message);
+    }
   };
+
+  const review = async (s: "approved" | "rejected") => {
+    if (!asset || !desktop) return;
+    await desktop.reviewAsset(asset.id, s);
+    setAsset(await api.getCurrentAsset(asset.listingId));
+  };
+
+  const genInputs = listing ? pickGenerationPhotos(listing.photos) : [];
 
   const onCapturePose = useCallback((fn: () => Pose) => setCapturePose(() => fn), []);
   const selected = tags.find((t) => t.id === selectedTagId) ?? null;
@@ -77,8 +114,9 @@ export default function App() {
       {feature === "settings" ? (
         <main className="settings">
           <h2>Settings</h2>
-          <p>Data source: <b>Fixtures</b> (offline). Garage sign-in and live listings arrive in Phase 2.</p>
-          <p>Desktop bridge: {(window as { garageDesktop?: { platform: string } }).garageDesktop?.platform ?? "browser (no Electron)"}</p>
+          <p>Garage listings: <b>{desktop ? (status.garage ? "connected (read-only)" : "GARAGE_DATABASE_URL not set") : "offline fixtures (browser mode)"}</b></p>
+          <p>Generation provider: <b>{status.provider ? "Meshy multi-image-to-3D" : "not configured (set MESHY_API_KEY in .env)"}</b></p>
+          <p>Desktop bridge: {desktop?.platform ?? "browser (no Electron)"}</p>
         </main>
       ) : (
         <>
@@ -112,8 +150,11 @@ export default function App() {
                   </div>
                   <div className="actions">
                     {asset?.processingStatus === "ready" && <button onClick={() => { setEditing((e) => !e); setPlacing(false); }}>{editing ? "Done editing" : "Edit tags"}</button>}
+                    {editing && asset && asset.reviewStatus !== "approved" && <button className="primary" onClick={() => review("approved")}>Approve</button>}
+                    {editing && asset && asset.reviewStatus !== "rejected" && <button onClick={() => review("rejected")}>Reject</button>}
                     {(!asset || asset.processingStatus === "failed" || asset.processingStatus === "ready") && (
-                      <button onClick={generate} disabled={listing.photos.length === 0} title={listing.photos.length === 0 ? "No listing photos to generate from" : ""}>
+                      <button onClick={generate} disabled={genInputs.length === 0 || (desktop && !status.provider)}
+                        title={genInputs.length === 0 ? "No exterior photos to generate from" : desktop && !status.provider ? "Set MESHY_API_KEY in .env" : `Uses ${genInputs.length} exterior photo(s)`}>
                         {asset ? "Regenerate" : "Generate 3D"}
                       </button>
                     )}
@@ -127,11 +168,11 @@ export default function App() {
                       pose={pose} onCapturePose={onCapturePose} />
                   ) : (
                     <div className="viewport-state center">
-                      {assetError ?? (
-                        !asset ? "No 3D representation. Generate one from the listing photos." :
+                      {genError ? `Generation request failed: ${genError}` : assetError ?? (
+                        !asset ? `No 3D representation yet. ${genInputs.length ? `Generate one from ${genInputs.length} exterior photos.` : "This listing has no labelled exterior photos."}` :
                         asset.processingStatus === "failed" ? `Generation failed: ${asset.error ?? "unknown error"}` :
-                        asset.processingStatus === "ready" ? "Asset awaiting review. Open the editor to inspect it." :
-                        `Generation ${STATUS_LABEL[asset.processingStatus].toLowerCase()}…`
+                        asset.processingStatus === "ready" ? (asset.reviewStatus === "rejected" ? "This version was rejected. Regenerate or open the editor to re-review." : "Asset awaiting review. Click Edit tags to inspect and approve it.") :
+                        `Generation ${STATUS_LABEL[asset.processingStatus].toLowerCase()}… this usually takes a few minutes.`
                       )}
                     </div>
                   )}
@@ -173,7 +214,7 @@ function Inspection({ listing, tags, selected, onSelect }: { listing: ListingDet
       <section>
         <h4>Photos {selected && <span className="meta">from listing</span>}</h4>
         {photos.length === 0 ? <p className="meta">No photos linked.</p> : (
-          <div className="photos">{photos.map((p) => <figure key={p.id}><img src={p.url} alt={p.viewLabel ?? ""} /><figcaption>{p.viewLabel ?? "Photo"}</figcaption></figure>)}</div>
+          <div className="photos">{photos.map((p) => <figure key={p.id}><img src={p.url} alt={p.viewLabel ?? ""} /><figcaption>{p.viewLabel ? VIEW_LABELS[p.viewLabel] ?? p.viewLabel : "Photo"}</figcaption></figure>)}</div>
         )}
       </section>
       <section>
@@ -199,12 +240,12 @@ function TagEditor({ tag, listing, capturePose, onChange, onDelete }: { tag: Lis
       <h3>Edit tag</h3>
       <label>Label<input value={tag.label} onChange={(e) => onChange({ label: e.target.value })} /></label>
       <label>Category
-        <select value={tag.category} onChange={(e) => onChange({ category: e.target.value as TagCategory })}>{TAG_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select>
+        <select value={tag.category} onChange={(e) => { const category = e.target.value as TagCategory; const views = CATEGORY_VIEWS[category]; const imageIds = listing.photos.filter((p) => p.viewLabel && views.includes(p.viewLabel)).map((p) => p.id); onChange({ category, label: tag.label.startsWith("New ") ? category : tag.label, evidence: { ...tag.evidence, imageIds: imageIds.length ? imageIds : tag.evidence.imageIds } }); }}>{TAG_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select>
       </label>
       <label>Description<textarea rows={3} value={tag.description ?? ""} onChange={(e) => onChange({ description: e.target.value || undefined })} /></label>
       <section>
         <h4>Photos</h4>
-        {listing.photos.map((p) => <label key={p.id} className="check"><input type="checkbox" checked={tag.evidence.imageIds.includes(p.id)} onChange={() => onChange({ evidence: { ...tag.evidence, imageIds: toggle(tag.evidence.imageIds, p.id) } })} />{p.viewLabel ?? p.id}</label>)}
+        {listing.photos.map((p) => <label key={p.id} className="check"><input type="checkbox" checked={tag.evidence.imageIds.includes(p.id)} onChange={() => onChange({ evidence: { ...tag.evidence, imageIds: toggle(tag.evidence.imageIds, p.id) } })} /><img src={p.url} alt="" className="mini" />{p.viewLabel ? VIEW_LABELS[p.viewLabel] ?? p.viewLabel : "Photo"}</label>)}
       </section>
       <section>
         <h4>Listing fields</h4>

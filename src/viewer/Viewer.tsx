@@ -1,7 +1,8 @@
 import { Component, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { Html, OrbitControls, useGLTF } from "@react-three/drei";
+import { ContactShadows, Environment, Html, OrbitControls, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
+import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import type { Listing3DAsset, Listing3DTag, Vec3 } from "../data/types.ts";
 import IllustrativeTruck from "./IllustrativeTruck.tsx";
@@ -18,6 +19,7 @@ export const PRESETS: Record<"Reset" | "Front" | "Rear" | "Left" | "Right", Pose
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
 
 export async function validateAssetUrl(url: string): Promise<string | null> {
+  if (url.startsWith("gi-asset://")) return null; // main process validated and stored it
   if (!/\.glb(\?|$)/i.test(url)) return "Unsupported asset type; only .glb is rendered.";
   try {
     const res = await fetch(url, { method: "HEAD" });
@@ -30,9 +32,35 @@ export async function validateAssetUrl(url: string): Promise<string | null> {
   }
 }
 
+// Normalizes any GLB into the viewer's frame: longest side = 8 units, centered on x/z, resting on y=0.
+// Deterministic from geometry, so tag coordinates stay reproducible for the same asset version.
 function Glb({ url }: { url: string }) {
   const { scene } = useGLTF(url);
-  return <primitive object={scene} />;
+  const box = new THREE.Box3().setFromObject(scene);
+  const size = box.getSize(new THREE.Vector3());
+  const k = 8 / Math.max(size.x, size.y, size.z, 1e-6);
+  const c = box.getCenter(new THREE.Vector3());
+  return <primitive object={scene} scale={k} position={[-c.x * k, -box.min.y * k, -c.z * k]} />;
+}
+
+// Gaussian splat (Nerfstudio Splatfacto export). Appearance only: no mesh, so tag occlusion raycasts pass through it.
+function Splat({ url, transform }: { url: string; transform?: Listing3DAsset["transform"] }) {
+  const { scene, gl } = useThree();
+  useEffect(() => {
+    const spark = new SparkRenderer({ renderer: gl });
+    const mesh = new SplatMesh({ url });
+    // Nerfstudio/COLMAP exports are y-down; default flip gives y-up. The reviewed transform refines scale/offset/yaw.
+    const t = transform ?? { scale: 1, position: [0, 0, 0] as Vec3, rotationDeg: [180, 0, 0] as Vec3 };
+    mesh.rotation.set(...(t.rotationDeg.map((d) => (d * Math.PI) / 180) as Vec3));
+    mesh.scale.setScalar(t.scale);
+    mesh.position.set(...t.position);
+    scene.add(spark, mesh);
+    return () => {
+      scene.remove(spark, mesh);
+      mesh.dispose();
+    };
+  }, [scene, gl, url, transform]);
+  return null;
 }
 
 // Eases camera + target toward a requested pose, then hands control back to OrbitControls.
@@ -123,21 +151,21 @@ export default function Viewer(props: {
   const renderable = props.asset.format === "procedural" || props.asset.storageKey;
 
   return (
-    <Canvas shadows camera={{ position: PRESETS.Reset.position, fov: 45 }} onPointerMissed={() => props.onSelectTag(null)} style={{ cursor: props.placing ? "crosshair" : "grab" }}>
+    <Canvas shadows dpr={[1, 2]} gl={{ toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05 }} camera={{ position: PRESETS.Reset.position, fov: 45 }} onPointerMissed={() => props.onSelectTag(null)} style={{ cursor: props.placing ? "crosshair" : "grab" }}>
       <color attach="background" args={["#15161a"]} />
-      <hemisphereLight intensity={0.6} groundColor="#222" />
-      <directionalLight position={[10, 12, 6]} intensity={1.6} castShadow shadow-mapSize={1024} />
-      <gridHelper args={[40, 40, "#2c2e35", "#22242a"]} position={[0, 0.001, 0]} />
-      <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
-        <planeGeometry args={[60, 60]} />
-        <shadowMaterial opacity={0.35} />
-      </mesh>
+      <Suspense fallback={<hemisphereLight intensity={1} groundColor="#222" />}>
+        <Environment preset="city" environmentIntensity={0.9} />
+      </Suspense>
+      <directionalLight position={[10, 12, 6]} intensity={1.2} castShadow shadow-mapSize={2048} />
+      {/* Splats carry their own photographed ground and surroundings; synthetic floor cues only fight them. */}
+      {props.asset.format !== "splat" && <gridHelper args={[40, 40, "#2c2e35", "#22242a"]} position={[0, 0.001, 0]} />}
+      {props.asset.format !== "splat" && <ContactShadows position={[0, 0, 0]} opacity={0.6} scale={30} blur={2.2} far={6} />}
 
       <group ref={model} onClick={onModelClick}>
         {renderable ? (
           <ErrorBoundary fallback={<Html center><div className="viewport-state">Unsupported or corrupt asset. Original photos remain available.</div></Html>}>
             <Suspense fallback={<Html center><div className="viewport-state">Loading model…</div></Html>}>
-              {props.asset.format === "glb" ? <Glb url={props.asset.storageKey!} /> : <IllustrativeTruck />}
+              {props.asset.format === "glb" ? <Glb url={props.asset.storageKey!} /> : props.asset.format === "splat" ? <Splat url={props.asset.storageKey!} transform={props.asset.transform} /> : <IllustrativeTruck />}
             </Suspense>
           </ErrorBoundary>
         ) : (

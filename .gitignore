@@ -2,3 +2,5 @@ node_modules
 dist
 dist-electron
 .DS_Store
+.env
+pipeline/inputs

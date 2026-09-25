@@ -31,8 +31,10 @@ export type Listing3DAsset = {
   listingId: string;
   version: number;
   representation: Representation;
-  format: "glb" | "procedural";
-  storageKey: string | null; // GLB URL/key; null for the procedural illustrative model
+  format: "glb" | "splat" | "procedural"; // splat = Gaussian splat .ply/.spz (photo-derived appearance, not a mesh)
+  storageKey: string | null; // asset URL/key; null for the procedural illustrative model
+  // Reviewed normalization into the viewer frame (y-up, ~8 units long, resting on y=0). Splats need it; meshes auto-fit.
+  transform?: { scale: number; position: Vec3; rotationDeg: Vec3 };
   templateCategory?: "pumper" | "aerial" | "tanker" | "ambulance";
   sourceImageIds: string[];
   sourceFingerprint: string;
