@@ -1,0 +1,226 @@
+import { useCallback, useEffect, useState } from "react";
+import type { Listing3DAsset, Listing3DTag, ListingDetail, ListingSummary, TagCategory, Vec3 } from "./data/types.ts";
+import { TAG_CATEGORIES } from "./data/types.ts";
+import { fixtureApi as api } from "./data/fixtures.ts";
+import { addTag, deleteTag, updateTag } from "./data/tags.ts";
+import Viewer, { PRESETS, validateAssetUrl, type Pose } from "./viewer/Viewer.tsx";
+
+type Feature = "3d" | "settings";
+
+const REPRESENTATION_LABEL = { illustrative: "Illustrative model", reconstructed: "Reconstructed from listing photos" } as const;
+const STATUS_LABEL = { none: "No 3D", queued: "Queued", processing: "Processing", ready: "Ready", failed: "Failed" } as const;
+
+export default function App() {
+  const [feature, setFeature] = useState<Feature>("3d");
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<ListingSummary[]>([]);
+  const [listing, setListing] = useState<ListingDetail | null>(null);
+  const [asset, setAsset] = useState<Listing3DAsset | null>(null);
+  const [assetError, setAssetError] = useState<string | null>(null);
+  const [tags, setTags] = useState<Listing3DTag[]>([]);
+  const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [placing, setPlacing] = useState(false);
+  const [pose, setPose] = useState<Pose | null>(null);
+  const [capturePose, setCapturePose] = useState<(() => Pose) | null>(null);
+
+  useEffect(() => void api.searchListings(query).then(setResults), [query]);
+
+  const openListing = async (id: string) => {
+    const [l, a] = await Promise.all([api.getListing(id), api.getCurrentAsset(id)]);
+    setListing(l);
+    setAsset(a);
+    setSelectedTagId(null);
+    setEditing(false);
+    setPlacing(false);
+    setPose(PRESETS.Reset);
+    setTags(a ? await api.listTags(a.id) : []);
+    setAssetError(a?.format === "glb" && a.storageKey ? await validateAssetUrl(a.storageKey) : null);
+  };
+
+  const commitTags = (next: Listing3DTag[]) => {
+    setTags(next);
+    if (asset) void api.saveTags(asset.id, next);
+  };
+
+  const selectTag = (id: string | null) => {
+    setSelectedTagId(id);
+    const t = tags.find((x) => x.id === id);
+    if (t) setPose(t.camera ?? { position: [t.position[0] + 4, t.position[1] + 2, t.position[2] + 4], target: t.position });
+  };
+
+  const generate = async () => {
+    if (!listing) return;
+    const a = await api.requestGeneration(listing.id);
+    setAsset(a);
+    setResults(await api.searchListings(query));
+  };
+
+  const onCapturePose = useCallback((fn: () => Pose) => setCapturePose(() => fn), []);
+  const selected = tags.find((t) => t.id === selectedTagId) ?? null;
+  const viewable = asset && asset.processingStatus === "ready" && (asset.reviewStatus === "approved" || editing);
+
+  return (
+    <div className="shell">
+      <nav className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">G</span>
+          <div>
+            <div className="brand-name">Garage Intelligence</div>
+            <div className="brand-sub">Internal tools</div>
+          </div>
+        </div>
+        <button className={feature === "3d" ? "active" : ""} onClick={() => setFeature("3d")}>3D Listings</button>
+        <button className={feature === "settings" ? "active" : ""} onClick={() => setFeature("settings")}>Settings</button>
+      </nav>
+
+      {feature === "settings" ? (
+        <main className="settings">
+          <h2>Settings</h2>
+          <p>Data source: <b>Fixtures</b> (offline). Garage sign-in and live listings arrive in Phase 2.</p>
+          <p>Desktop bridge: {(window as { garageDesktop?: { platform: string } }).garageDesktop?.platform ?? "browser (no Electron)"}</p>
+        </main>
+      ) : (
+        <>
+          <aside className="browser">
+            <input placeholder="Search title or listing #" value={query} onChange={(e) => setQuery(e.target.value)} />
+            <ul>
+              {results.map((r) => (
+                <li key={r.id} className={listing?.id === r.id ? "active" : ""} onClick={() => openListing(r.id)}>
+                  {r.thumbnailUrl ? <img src={r.thumbnailUrl} alt="" /> : <div className="thumb-empty" />}
+                  <div>
+                    <div className="title">{r.listingTitle}</div>
+                    <div className="meta">#{r.secondaryId} · <span className={`pill ${r.processingStatus}`}>{STATUS_LABEL[r.processingStatus]}</span></div>
+                  </div>
+                </li>
+              ))}
+              {results.length === 0 && <li className="empty">No listings match.</li>}
+            </ul>
+          </aside>
+
+          <main className="viewer">
+            {!listing ? (
+              <div className="viewport-state center">Select a listing to open its 3D representation.</div>
+            ) : (
+              <>
+                <header>
+                  <div>
+                    <div className="title">{listing.listingTitle} <span className="meta">#{listing.secondaryId}</span></div>
+                    <div className="meta">
+                      {asset ? <><span className={`pill ${asset.representation}`}>{REPRESENTATION_LABEL[asset.representation]}</span> · v{asset.version} · {STATUS_LABEL[asset.processingStatus]} · review {asset.reviewStatus}</> : "No 3D asset yet"}
+                    </div>
+                  </div>
+                  <div className="actions">
+                    {asset?.processingStatus === "ready" && <button onClick={() => { setEditing((e) => !e); setPlacing(false); }}>{editing ? "Done editing" : "Edit tags"}</button>}
+                    {(!asset || asset.processingStatus === "failed" || asset.processingStatus === "ready") && (
+                      <button onClick={generate} disabled={listing.photos.length === 0} title={listing.photos.length === 0 ? "No listing photos to generate from" : ""}>
+                        {asset ? "Regenerate" : "Generate 3D"}
+                      </button>
+                    )}
+                  </div>
+                </header>
+
+                <div className="viewport">
+                  {viewable && asset && !assetError ? (
+                    <Viewer asset={asset} tags={tags} selectedTagId={selectedTagId} onSelectTag={selectTag} placing={placing}
+                      onPlace={(p: Vec3) => { const next = addTag(tags, asset.id, p); commitTags(next); setSelectedTagId(next[next.length - 1].id); setPlacing(false); }}
+                      pose={pose} onCapturePose={onCapturePose} />
+                  ) : (
+                    <div className="viewport-state center">
+                      {assetError ?? (
+                        !asset ? "No 3D representation. Generate one from the listing photos." :
+                        asset.processingStatus === "failed" ? `Generation failed: ${asset.error ?? "unknown error"}` :
+                        asset.processingStatus === "ready" ? "Asset awaiting review. Open the editor to inspect it." :
+                        `Generation ${STATUS_LABEL[asset.processingStatus].toLowerCase()}…`
+                      )}
+                    </div>
+                  )}
+                  {viewable && !assetError && (
+                    <div className="hud">
+                      {(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((k) => <button key={k} onClick={() => setPose({ ...PRESETS[k] })}>{k}</button>)}
+                      {editing && <button className={placing ? "primary" : ""} onClick={() => setPlacing((p) => !p)}>{placing ? "Click the model…" : "+ Add tag"}</button>}
+                    </div>
+                  )}
+                  {asset?.representation === "illustrative" && viewable && <div className="disclaimer">Illustrative template: layout and proportions are not this vehicle's. Check the original photos.</div>}
+                </div>
+              </>
+            )}
+          </main>
+
+          <aside className="panel">
+            {!listing ? null : editing && selected && asset ? (
+              <TagEditor tag={selected} listing={listing} capturePose={capturePose}
+                onChange={(patch) => commitTags(updateTag(tags, selected.id, patch))}
+                onDelete={() => { commitTags(deleteTag(tags, selected.id)); setSelectedTagId(null); }} />
+            ) : (
+              <Inspection listing={listing} tags={tags} selected={selected} onSelect={selectTag} />
+            )}
+          </aside>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Inspection({ listing, tags, selected, onSelect }: { listing: ListingDetail; tags: Listing3DTag[]; selected: Listing3DTag | null; onSelect: (id: string) => void }) {
+  const photos = selected ? listing.photos.filter((p) => selected.evidence.imageIds.includes(p.id)) : listing.photos;
+  const fields = selected ? selected.evidence.fields : Object.keys(listing.attributes);
+  return (
+    <>
+      <h3>{selected ? selected.label : "Listing"}</h3>
+      {selected?.description && <p className="meta">{selected.description}</p>}
+      {!selected && listing.listingDescription && <p className="meta">{listing.listingDescription}</p>}
+      <section>
+        <h4>Photos {selected && <span className="meta">from listing</span>}</h4>
+        {photos.length === 0 ? <p className="meta">No photos linked.</p> : (
+          <div className="photos">{photos.map((p) => <figure key={p.id}><img src={p.url} alt={p.viewLabel ?? ""} /><figcaption>{p.viewLabel ?? "Photo"}</figcaption></figure>)}</div>
+        )}
+      </section>
+      <section>
+        <h4>Specifications</h4>
+        {fields.length === 0 ? <p className="meta">No specifications linked.</p> : (
+          <dl>{fields.map((f) => <div key={f}><dt>{f}</dt><dd className={listing.attributes[f] ? "" : "meta"}>{listing.attributes[f] ?? "Unavailable"}</dd></div>)}</dl>
+        )}
+      </section>
+      <section>
+        <h4>Parts</h4>
+        {tags.length === 0 ? <p className="meta">No tags on this asset version.</p> : (
+          <ul className="parts">{tags.map((t) => <li key={t.id}><button className={t.id === selected?.id ? "active" : ""} onClick={() => onSelect(t.id)}>{t.label} <span className="meta">{t.category}</span></button></li>)}</ul>
+        )}
+      </section>
+    </>
+  );
+}
+
+function TagEditor({ tag, listing, capturePose, onChange, onDelete }: { tag: Listing3DTag; listing: ListingDetail; capturePose: (() => Pose) | null; onChange: (patch: Partial<Listing3DTag>) => void; onDelete: () => void }) {
+  const toggle = (list: string[], v: string) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+  return (
+    <>
+      <h3>Edit tag</h3>
+      <label>Label<input value={tag.label} onChange={(e) => onChange({ label: e.target.value })} /></label>
+      <label>Category
+        <select value={tag.category} onChange={(e) => onChange({ category: e.target.value as TagCategory })}>{TAG_CATEGORIES.map((c) => <option key={c}>{c}</option>)}</select>
+      </label>
+      <label>Description<textarea rows={3} value={tag.description ?? ""} onChange={(e) => onChange({ description: e.target.value || undefined })} /></label>
+      <section>
+        <h4>Photos</h4>
+        {listing.photos.map((p) => <label key={p.id} className="check"><input type="checkbox" checked={tag.evidence.imageIds.includes(p.id)} onChange={() => onChange({ evidence: { ...tag.evidence, imageIds: toggle(tag.evidence.imageIds, p.id) } })} />{p.viewLabel ?? p.id}</label>)}
+      </section>
+      <section>
+        <h4>Listing fields</h4>
+        {Object.keys(listing.attributes).length === 0 && <p className="meta">This listing has no attributes.</p>}
+        {Object.keys(listing.attributes).map((f) => <label key={f} className="check"><input type="checkbox" checked={tag.evidence.fields.includes(f)} onChange={() => onChange({ evidence: { ...tag.evidence, fields: toggle(tag.evidence.fields, f) } })} />{f}</label>)}
+      </section>
+      <section>
+        <h4>Camera</h4>
+        <p className="meta">{tag.camera ? "Saved view set." : "No saved view; focus falls back to the tag position."}</p>
+        <div className="row">
+          <button onClick={() => capturePose && onChange({ camera: capturePose() })} disabled={!capturePose}>Save current view</button>
+          {tag.camera && <button onClick={() => onChange({ camera: undefined })}>Clear</button>}
+        </div>
+      </section>
+      <p className="meta">Position (model-local): {tag.position.join(", ")} · asset {tag.assetVersionId}</p>
+      <button className="danger" onClick={onDelete}>Delete tag</button>
+    </>
+  );
+}
