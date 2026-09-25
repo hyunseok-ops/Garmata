@@ -34,13 +34,19 @@ export async function validateAssetUrl(url: string): Promise<string | null> {
 
 // Normalizes any GLB into the viewer's frame: longest side = 8 units, centered on x/z, resting on y=0.
 // Deterministic from geometry, so tag coordinates stay reproducible for the same asset version.
-function Glb({ url }: { url: string }) {
+function Glb({ url, transform }: { url: string; transform?: Listing3DAsset["transform"] }) {
   const { scene } = useGLTF(url);
   const box = new THREE.Box3().setFromObject(scene);
   const size = box.getSize(new THREE.Vector3());
   const k = 8 / Math.max(size.x, size.y, size.z, 1e-6);
   const c = box.getCenter(new THREE.Vector3());
-  return <primitive object={scene} scale={k} position={[-c.x * k, -box.min.y * k, -c.z * k]} />;
+  // Meshes auto-fit; the reviewed transform only supplies yaw (generators don't agree on which way is forward).
+  const yaw = ((transform?.rotationDeg[1] ?? 0) * Math.PI) / 180;
+  return (
+    <group rotation={[0, yaw, 0]}>
+      <primitive object={scene} scale={k} position={[-c.x * k, -box.min.y * k, -c.z * k]} />
+    </group>
+  );
 }
 
 // Gaussian splat (Nerfstudio Splatfacto export). Appearance only: no mesh, so tag occlusion raycasts pass through it.
@@ -165,7 +171,7 @@ export default function Viewer(props: {
         {renderable ? (
           <ErrorBoundary fallback={<Html center><div className="viewport-state">Unsupported or corrupt asset. Original photos remain available.</div></Html>}>
             <Suspense fallback={<Html center><div className="viewport-state">Loading model…</div></Html>}>
-              {props.asset.format === "glb" ? <Glb url={props.asset.storageKey!} /> : props.asset.format === "splat" ? <Splat url={props.asset.storageKey!} transform={props.asset.transform} /> : <IllustrativeTruck />}
+              {props.asset.format === "glb" ? <Glb url={props.asset.storageKey!} transform={props.asset.transform} /> : props.asset.format === "splat" ? <Splat url={props.asset.storageKey!} transform={props.asset.transform} /> : <IllustrativeTruck />}
             </Suspense>
           </ErrorBoundary>
         ) : (

@@ -25,6 +25,16 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
   await js(`[...document.querySelectorAll('header button')].find(b => b.textContent === 'Edit tags')?.click()`);
   await wait(12000); // GLB + HDRI load
   await shot("3-editor");
+  for (const name of (process.env.GI_SMOKE_TAGS ?? "").split(",").filter(Boolean)) {
+    await js(`[...document.querySelectorAll('.parts button')].find(b => b.textContent.startsWith(${JSON.stringify(name)}))?.click()`);
+    await wait(1800);
+    await shot(`6-${name.replace(/\W+/g, "-")}`);
+  }
+  for (const name of (process.env.GI_SMOKE_PRESETS ?? "").split(",").filter(Boolean)) {
+    await js(`[...document.querySelectorAll('.hud button')].find(b => b.textContent === ${JSON.stringify(name)})?.click()`);
+    await wait(1500);
+    await shot(`5-${name}`);
+  }
   await js(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent.startsWith('Versions'))?.click()`);
   await wait(800);
   await shot("4-versions");

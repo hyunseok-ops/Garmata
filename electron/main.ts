@@ -103,6 +103,7 @@ async function requestGeneration(listingId: string): Promise<Listing3DAsset> {
   const asset: Listing3DAsset = {
     id: `${listing.secondaryId}-v${version}`, listingId, version, representation: "reconstructed", format: "glb", storageKey: null,
     sourceImageIds: inputs.map((p) => p.id), sourceFingerprint: fingerprint, pipelineVersion: "meshy-multi-image-ultra-1",
+    transform: { scale: 1, position: [0, 0, 0], rotationDeg: [0, 180, 0] }, // Meshy meshes face -X; the viewer's presets assume +X
     processingStatus: "queued", reviewStatus: "pending", createdAt: new Date().toISOString(),
   };
   // Meshy fetches the source photos before answering the POST; this can take minutes.
