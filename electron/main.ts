@@ -102,14 +102,15 @@ async function requestGeneration(listingId: string): Promise<Listing3DAsset> {
   const version = Math.max(0, ...store.assets.filter((a) => a.listingId === listingId).map((a) => a.version)) + 1;
   const asset: Listing3DAsset = {
     id: `${listing.secondaryId}-v${version}`, listingId, version, representation: "reconstructed", format: "glb", storageKey: null,
-    sourceImageIds: inputs.map((p) => p.id), sourceFingerprint: fingerprint, pipelineVersion: "meshy-multi-image-1",
+    sourceImageIds: inputs.map((p) => p.id), sourceFingerprint: fingerprint, pipelineVersion: "meshy-multi-image-ultra-1",
     processingStatus: "queued", reviewStatus: "pending", createdAt: new Date().toISOString(),
   };
   // Meshy fetches the source photos before answering the POST; this can take minutes.
   const image_urls = await Promise.all(inputs.map((p) => generationInput(p.url)));
   const { result: taskId } = await meshy("", {
     method: "POST",
-    body: JSON.stringify({ image_urls, should_texture: true, enable_pbr: true, ai_model: "latest", target_formats: ["glb"] }),
+    // Ultra tier: 2k geometry + 4k PBR textures. Costs about double the default but keeps lettering and equipment legible.
+    body: JSON.stringify({ image_urls, should_texture: true, enable_pbr: true, ai_model: "latest", geometry_resolution: "2k", texture_resolution: "4k", target_formats: ["glb"] }),
   });
   store.assets.push(asset);
   store.jobs[asset.id] = taskId;
