@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("garageDesktop", {
   searchListings: call("listings.search"),
   getListing: call("listings.get"),
   getCurrentAsset: call("assets.current"),
+  listAssets: call("assets.list"),
   requestGeneration: call("assets.generate"),
   reviewAsset: call("assets.review"),
   listTags: call("tags.list"),

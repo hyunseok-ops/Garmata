@@ -13,6 +13,8 @@ type Feature = "3d" | "settings";
 const api = desktop ?? fixtureApi;
 
 const REPRESENTATION_LABEL = { illustrative: "Illustrative model", reconstructed: "Reconstructed from listing photos" } as const;
+type Tab = "3d" | "versions";
+
 const STATUS_LABEL = { none: "No 3D", queued: "Queued", processing: "Processing", ready: "Ready", failed: "Failed" } as const;
 
 export default function App() {
@@ -21,6 +23,8 @@ export default function App() {
   const [results, setResults] = useState<ListingSummary[]>([]);
   const [listing, setListing] = useState<ListingDetail | null>(null);
   const [asset, setAsset] = useState<Listing3DAsset | null>(null);
+  const [versions, setVersions] = useState<Listing3DAsset[]>([]);
+  const [tab, setTab] = useState<Tab>("3d");
   const [assetError, setAssetError] = useState<string | null>(null);
   const [tags, setTags] = useState<Listing3DTag[]>([]);
   const [selectedTagId, setSelectedTagId] = useState<string | null>(null);
@@ -50,9 +54,11 @@ export default function App() {
   useEffect(() => void api.searchListings(query).then(setResults), [query]);
 
   const openListing = async (id: string) => {
-    const [l, a] = await Promise.all([api.getListing(id), api.getCurrentAsset(id)]);
+    const [l, a, vs] = await Promise.all([api.getListing(id), api.getCurrentAsset(id), api.listAssets(id)]);
     setListing(l);
     setAsset(a);
+    setVersions(vs);
+    setTab("3d");
     setSelectedTagId(null);
     setEditing(false);
     setPlacing(false);
@@ -85,17 +91,29 @@ export default function App() {
     }
   };
 
-  const review = async (s: "approved" | "rejected") => {
-    if (!asset || !desktop) return;
-    await desktop.reviewAsset(asset.id, s);
-    setAsset(await api.getCurrentAsset(asset.listingId));
+  const review = async (s: "approved" | "rejected", target: Listing3DAsset | null = asset) => {
+    if (!target || !desktop) return;
+    await desktop.reviewAsset(target.id, s);
+    setVersions(await api.listAssets(target.listingId));
+    if (asset?.id === target.id) setAsset({ ...target, reviewStatus: s });
+  };
+
+  // Viewing a specific version from the Versions tab; tags follow the version.
+  const viewVersion = async (v: Listing3DAsset) => {
+    setPickedVersion(v.id);
+    setAsset(v);
+    setTags(await api.listTags(v.id));
+    setSelectedTagId(null);
+    setTab("3d");
+    setAssetError(v.format === "glb" && v.storageKey ? await validateAssetUrl(v.storageKey) : null);
   };
 
   const genInputs = listing ? pickGenerationPhotos(listing.photos) : [];
 
   const onCapturePose = useCallback((fn: () => Pose) => setCapturePose(() => fn), []);
   const selected = tags.find((t) => t.id === selectedTagId) ?? null;
-  const viewable = asset && asset.processingStatus === "ready" && (asset.reviewStatus === "approved" || editing);
+  const [pickedVersion, setPickedVersion] = useState<string | null>(null);
+  const viewable = asset && asset.processingStatus === "ready" && (asset.reviewStatus === "approved" || editing || pickedVersion === asset.id);
 
   return (
     <div className="shell">
@@ -161,6 +179,28 @@ export default function App() {
                   </div>
                 </header>
 
+                <div className="tabs">
+                  <button className={tab === "3d" ? "active" : ""} onClick={() => setTab("3d")}>3D orbit</button>
+                  <button className={tab === "versions" ? "active" : ""} onClick={() => setTab("versions")}>Versions{versions.length ? ` (${versions.length})` : ""}</button>
+                </div>
+                {tab === "versions" ? (
+                  <div className="versions">
+                    {versions.length === 0 && <p className="meta">No generated versions yet.</p>}
+                    {versions.map((v) => (
+                      <div key={v.id} className={`version ${asset?.id === v.id ? "active" : ""}`}>
+                        <div>
+                          <div className="title">v{v.version} <span className={`pill ${v.representation}`}>{REPRESENTATION_LABEL[v.representation]}</span> <span className={`pill ${v.processingStatus}`}>{STATUS_LABEL[v.processingStatus]}</span> <span className={`pill ${v.reviewStatus}`}>{v.reviewStatus}</span></div>
+                          <div className="meta">{v.pipelineVersion} · {v.format} · {v.sourceImageIds.length ? `${v.sourceImageIds.length} source photos · ` : ""}{new Date(v.createdAt).toLocaleString()}{v.error ? ` · ${v.error}` : ""}</div>
+                        </div>
+                        <div className="row">
+                          <button onClick={() => viewVersion(v)} disabled={v.processingStatus !== "ready"}>{asset?.id === v.id ? "Viewing" : "View"}</button>
+                          {api === desktop && v.reviewStatus !== "approved" && v.processingStatus === "ready" && <button className="primary" onClick={() => review("approved", v)}>Approve</button>}
+                          {api === desktop && v.reviewStatus !== "rejected" && <button onClick={() => review("rejected", v)}>Reject</button>}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
                 <div className="viewport">
                   {viewable && asset && !assetError ? (
                     <Viewer asset={asset} tags={tags} selectedTagId={selectedTagId} onSelectTag={selectTag} placing={placing}
@@ -184,6 +224,7 @@ export default function App() {
                   )}
                   {asset?.representation === "illustrative" && viewable && <div className="disclaimer">Illustrative template: layout and proportions are not this vehicle's. Check the original photos.</div>}
                 </div>
+                )}
               </>
             )}
           </main>

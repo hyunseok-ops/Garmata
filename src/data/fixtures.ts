@@ -123,6 +123,9 @@ export const fixtureApi: ListingsApi = {
   async getCurrentAsset(listingId) {
     return assets.find((a) => a.listingId === listingId) ?? null;
   },
+  async listAssets(listingId) {
+    return assets.filter((a) => a.listingId === listingId).sort((a, b) => b.version - a.version);
+  },
   async requestGeneration(listingId) {
     const l = listings.find((x) => x.id === listingId)!;
     const existing = assets.find((a) => a.listingId === listingId);

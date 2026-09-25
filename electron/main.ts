@@ -160,6 +160,7 @@ ipcMain.handle("status", () => ({ garage: !!db, provider: !!meshyKey() }));
 ipcMain.handle("listings.search", (_e, q: string) => searchListings(q));
 ipcMain.handle("listings.get", (_e, id: string) => getListing(id));
 ipcMain.handle("assets.current", (_e, listingId: string) => currentAsset(loadStore(), listingId));
+ipcMain.handle("assets.list", (_e, listingId: string) => loadStore().assets.filter((a) => a.listingId === listingId).sort((a, b) => b.version - a.version));
 ipcMain.handle("assets.generate", (_e, listingId: string) => requestGeneration(listingId));
 ipcMain.handle("assets.review", (_e, assetId: string, reviewStatus: "approved" | "rejected") => {
   const s = loadStore();

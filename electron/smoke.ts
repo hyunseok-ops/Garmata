@@ -25,6 +25,9 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
   await js(`[...document.querySelectorAll('header button')].find(b => b.textContent === 'Edit tags')?.click()`);
   await wait(12000); // GLB + HDRI load
   await shot("3-editor");
+  await js(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent.startsWith('Versions'))?.click()`);
+  await wait(800);
+  await shot("4-versions");
   const summary = await js(`({ items: document.querySelectorAll('.browser li').length, photos: document.querySelectorAll('.photos img').length, specs: document.querySelectorAll('dl dt').length, state: document.querySelector('.viewport-state')?.textContent ?? null, title: document.querySelector('.viewer header .title')?.textContent ?? null })`);
   console.log(JSON.stringify({ ...summary, errors }));
 }

@@ -74,3 +74,13 @@ dd { margin: 0; text-align: right; }
 
 .mini { width: 44px; height: 30px; object-fit: cover; border-radius: 3px; }
 .photos img { cursor: zoom-in; }
+.tabs { display: flex; gap: 4px; padding: 8px 16px 0; background: var(--panel); border-bottom: 1px solid var(--line); }
+.tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 10px; color: var(--muted); }
+.tabs button.active { color: var(--fg); border-bottom-color: var(--accent-2); }
+.versions { padding: 16px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.version { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.version.active { border-color: var(--accent-2); }
+.version .title { font-weight: 600; }
+.pill.approved { background: #1e3a2a; color: #7fd39a; }
+.pill.rejected { background: #3a1e1e; color: #f08080; }
+.pill.pending { background: #2a2c34; color: var(--muted); }

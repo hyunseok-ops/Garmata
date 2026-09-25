@@ -66,6 +66,7 @@ export interface ListingsApi {
   searchListings(query: string): Promise<ListingSummary[]>;
   getListing(id: string): Promise<ListingDetail>;
   getCurrentAsset(listingId: string): Promise<Listing3DAsset | null>;
+  listAssets(listingId: string): Promise<Listing3DAsset[]>; // every version, newest first
   requestGeneration(listingId: string): Promise<Listing3DAsset>;
   listTags(assetVersionId: string): Promise<Listing3DTag[]>;
   saveTags(assetVersionId: string, tags: Listing3DTag[]): Promise<void>;
