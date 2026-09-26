@@ -207,6 +207,55 @@ async function generateCli(ids: string[]) {
   }
 }
 
+// ---- Tag seeding -------------------------------------------------------------------------------
+// Template positions in the viewer frame (vehicle faces +X, driver side +Z, ~8 units long). Reviewers drag to refine.
+type Seed = { label: string; category: Listing3DTag["category"]; position: [number, number, number]; camera: [[number, number, number], [number, number, number]]; views: string[]; fields: RegExp; description: string };
+const CAM_SIDE = (x: number, y: number): [[number, number, number], [number, number, number]] => [[x + 0.6, y + 1, 6.8], [x, y - 0.1, 0.6]];
+const PUMPER: Seed[] = [
+  { label: "Cab", category: "Cab", position: [2.7, 1.9, 1.28], camera: [[7.5, 3.2, 6.5], [2.7, 1.6, 0.3]], views: ["cab_interior", "dash"], fields: /model|chassis|automatic|cab|seat/i, description: "Cab and crew area." },
+  { label: "Pump Panel", category: "Pump Panel", position: [0.9, 1.55, 1.3], camera: CAM_SIDE(0.9, 1.5), views: ["pump_panel"], fields: /pump|tank|foam/i, description: "Pump operator's panel." },
+  { label: "Compartments", category: "Compartments", position: [-1.6, 1.35, 1.3], camera: CAM_SIDE(-1.6, 1.3), views: ["compartment"], fields: /body/i, description: "Body compartments, driver side." },
+  { label: "Engine", category: "Engine", position: [3.95, 1.05, 0], camera: [[9.5, 2.2, 1.5], [4, 1.1, 0]], views: ["engine_bay"], fields: /engine|mileage|fuel|runs|service|hours/i, description: "Engine and drivetrain." },
+  { label: "Wheels/Tires", category: "Wheels/Tires", position: [2.3, 0.5, 1.2], camera: [[4.2, 1.3, 5.2], [2.3, 0.5, 0.8]], views: ["wheel_tire", "undercarriage"], fields: /4wd|tire|wheel|axle/i, description: "Wheels, tires and undercarriage." },
+  { label: "Rear", category: "Rear", position: [-3.95, 1.4, 0], camera: [[-9.5, 2.6, 2], [-4, 1.3, 0]], views: ["rear", "rear_34"], fields: /tank|vehicle type|hose/i, description: "Rear of the apparatus." },
+];
+const AERIAL: Seed[] = [
+  ...PUMPER.filter((t) => t.label !== "Rear"),
+  { label: "Aerial", category: "Other", position: [-1.5, 2.7, 0], camera: [[-3, 5.5, 6.5], [-1.5, 2.4, 0]], views: ["other"], fields: /aerial|ladder|jack|outrigger/i, description: "Aerial device, turntable and jacks." },
+  { label: "Rear", category: "Rear", position: [-3.95, 1.4, 0], camera: [[-9.5, 2.6, 2], [-4, 1.3, 0]], views: ["rear", "rear_34"], fields: /tank|vehicle type|hose/i, description: "Rear of the apparatus." },
+];
+const AMBULANCE: Seed[] = [
+  { label: "Cab", category: "Cab", position: [2.9, 1.7, 1.15], camera: [[7.5, 3, 6.5], [2.9, 1.4, 0.3]], views: ["cab_interior", "dash"], fields: /model|chassis|automatic|cab|seat|make/i, description: "Chassis cab." },
+  { label: "Patient Module", category: "Other", position: [-0.8, 1.9, 1.3], camera: CAM_SIDE(-0.8, 1.8), views: ["module_interior"], fields: /module|stretcher|cot|headroom|interior/i, description: "Patient compartment interior." },
+  { label: "Compartments", category: "Compartments", position: [-2.2, 1.1, 1.3], camera: CAM_SIDE(-2.2, 1.1), views: ["compartment"], fields: /body|builder/i, description: "Exterior compartments." },
+  { label: "Engine", category: "Engine", position: [4.1, 1.0, 0], camera: [[9.5, 2.2, 1.5], [4.1, 1.0, 0]], views: ["engine_bay"], fields: /engine|mileage|fuel|runs|service|hours/i, description: "Engine and drivetrain." },
+  { label: "Wheels/Tires", category: "Wheels/Tires", position: [2.6, 0.5, 1.15], camera: [[4.5, 1.3, 5], [2.6, 0.5, 0.8]], views: ["wheel_tire", "undercarriage"], fields: /4wd|tire|wheel|axle/i, description: "Wheels and tires." },
+  { label: "Rear Doors", category: "Rear", position: [-3.9, 1.5, 0], camera: [[-9.5, 2.6, 2], [-3.9, 1.4, 0]], views: ["rear", "rear_34"], fields: /vehicle type|loader|lift/i, description: "Rear loading doors." },
+];
+function templateFor(title: string): Seed[] {
+  if (/ambulance|type i\b|type ii|type iii/i.test(title)) return AMBULANCE;
+  if (/quint|aerial|ladder|tower|platform/i.test(title)) return AERIAL;
+  return PUMPER;
+}
+async function seedTags(assetId: string) {
+  const s = loadStore();
+  const asset = s.assets.find((a) => a.id === assetId);
+  if (!asset) throw new Error(`no asset ${assetId}`);
+  const listing = await getListing(asset.listingId);
+  const template = templateFor(listing.listingTitle);
+  const tags: Listing3DTag[] = template.map((t, i) => ({
+    id: crypto.randomUUID(), assetVersionId: assetId, label: t.label, category: t.category, position: t.position,
+    camera: { position: t.camera[0], target: t.camera[1] }, description: t.description, order: i,
+    evidence: {
+      imageIds: listing.photos.filter((p) => p.viewLabel && t.views.includes(p.viewLabel)).slice(0, 6).map((p) => p.id),
+      fields: Object.keys(listing.attributes).filter((f) => t.fields.test(f)),
+    },
+  })).filter((t) => t.evidence.imageIds.length || t.evidence.fields.length); // plan §8: only tags supported by evidence
+  s.tags = [...s.tags.filter((t) => t.assetVersionId !== assetId), ...tags];
+  saveStore(s);
+  console.log(`seeded ${tags.length} tags on ${assetId} (${template === AMBULANCE ? "ambulance" : template === AERIAL ? "aerial" : "pumper"} template)`);
+}
+
 // Headless: GI_IMPORT=<listingId>,<file.ply|.glb>,<pipelineVersion>[,illustrative] registers an externally produced asset version.
 // GI_TRANSFORM='{"scale":1,"position":[0,0,0],"rotationDeg":[180,0,0]}' sets the reviewed normalization for splats.
 function importCli(listingId: string, file: string, pipelineVersion: string, representation: Listing3DAsset["representation"]) {
@@ -227,6 +276,15 @@ function importCli(listingId: string, file: string, pipelineVersion: string, rep
 
 app.whenReady().then(() => {
   for (const assetId of Object.keys(loadStore().jobs)) void pollJob(assetId); // resume after restart, in every mode
+  if (process.env.GI_SEED_TAGS) {
+    // GI_SEED_TAGS=<assetId,...|approved> seeds template tags; "approved" = every approved asset without tags.
+    const s = loadStore();
+    const ids = process.env.GI_SEED_TAGS === "approved"
+      ? s.assets.filter((a) => a.reviewStatus === "approved" && !s.tags.some((t) => t.assetVersionId === a.id)).map((a) => a.id)
+      : process.env.GI_SEED_TAGS.split(",");
+    void (async () => { for (const id of ids) await seedTags(id); })().catch((e) => console.error(e)).finally(() => app.exit(0));
+    return;
+  }
   if (process.env.GI_IMPORT) {
     const [listingId, file, pipelineVersion = "manual", rep] = process.env.GI_IMPORT.split(",");
     importCli(listingId, file, pipelineVersion, rep === "illustrative" ? "illustrative" : "reconstructed");
