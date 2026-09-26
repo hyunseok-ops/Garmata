@@ -20,9 +20,9 @@ npm run build      # typecheck + renderer/main bundles
 | --- | --- |
 | 0 Reconstruction evaluation | Not started. Manual experiment; no code. Provider unselected. |
 | 1 Desktop shell + viewer | Done. Sidebar, listing browser, orbit/zoom/pan, Front/Rear/Left/Right/Reset, anchored tags that fade when occluded, inspection panel. |
-| 2 Garage integration | Not started. `ListingsApi` in `src/data/types.ts` is the seam; `src/data/fixtures.ts` is the only implementation. Field names follow `Listing`, `ListingImage`, `ListingAttribute` in the Garage Prisma schema. Auth is absent; the app has no sign-in. |
-| 3 Tag editor | Done against fixtures. Click-to-place in model-local coords, label/category/description, photo + field evidence, saved camera pose, delete. Tags persist per asset version in `localStorage`. |
-| 4 Generation + review | Stubbed. `requestGeneration` creates a queued version and refuses to duplicate a live job or replace an approved one. No worker, storage, or reviewer UI. |
+| 2 Garage integration | Reads: Electron main queries Garage Postgres read-only (`GARAGE_DATABASE_URL`) for listings, labelled photos and specs. Writes: admin oRPC on the Garage branch (see below). No user sign-in; access = DB URL + admin API key. |
+| 3 Tag editor | Done. Click-to-place, label/category/description, photo + field evidence, saved camera, delete; per-asset-version persistence; template seeding by vehicle type (`GI_SEED_TAGS`); angle-matched real photo panel while orbiting. |
+| 4 Generation + review | Meshy multi-image-to-3D (Ultra tier) end to end: 13 real listings generated, versioned, approved and tagged. Versions tab with view/approve/reject. Splat pipeline on Modal proven on a walkaround; listing photos alone do not reconstruct. |
 | 5 Pilot packaging | `npm run dist` produces an unsigned macOS build. No auto-update, no code signing. |
 
 ## Garage integration (Phase 4 backend)
