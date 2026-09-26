@@ -202,7 +202,8 @@ async function generateCli(ids: string[]) {
     const s = loadStore();
     const mine = s.assets.filter((a) => ids.includes(a.listingId));
     console.log(mine.map((a) => `${a.id}: ${a.processingStatus}${a.error ? " " + a.error : ""}`).join(" | "));
-    if (mine.every((a) => a.processingStatus === "ready" || a.processingStatus === "failed")) return;
+    // Also wait for jobs resumed from a previous run, so nothing is left half-polled when this process exits.
+    if (mine.every((a) => a.processingStatus === "ready" || a.processingStatus === "failed") && Object.keys(s.jobs).length === 0) return;
   }
 }
 
@@ -225,6 +226,7 @@ function importCli(listingId: string, file: string, pipelineVersion: string, rep
 }
 
 app.whenReady().then(() => {
+  for (const assetId of Object.keys(loadStore().jobs)) void pollJob(assetId); // resume after restart, in every mode
   if (process.env.GI_IMPORT) {
     const [listingId, file, pipelineVersion = "manual", rep] = process.env.GI_IMPORT.split(",");
     importCli(listingId, file, pipelineVersion, rep === "illustrative" ? "illustrative" : "reconstructed");
@@ -240,7 +242,6 @@ app.whenReady().then(() => {
     const file = assetFile(id.replace(/[^a-z0-9_-]/gi, ""));
     return file ? net.fetch(pathToFileURL(file).href) : new Response("not found", { status: 404 });
   });
-  for (const assetId of Object.keys(loadStore().jobs)) void pollJob(assetId); // resume after restart
   createWindow();
   app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });
