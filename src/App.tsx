@@ -5,7 +5,7 @@ import { fixtureApi } from "./data/fixtures.ts";
 import { desktop } from "./data/garageApi.ts";
 import { CATEGORY_VIEWS, VIEW_LABELS, pickGenerationPhotos } from "./data/photos.ts";
 import { addTag, deleteTag, updateTag } from "./data/tags.ts";
-import Viewer, { PRESETS, validateAssetUrl, type Pose } from "./viewer/Viewer.tsx";
+import Viewer, { PRESETS, validateAssetUrl, type Pose, type ViewBucket } from "./viewer/Viewer.tsx";
 
 type Feature = "3d" | "settings";
 
@@ -113,6 +113,11 @@ export default function App() {
   const onCapturePose = useCallback((fn: () => Pose) => setCapturePose(() => fn), []);
   const selected = tags.find((t) => t.id === selectedTagId) ?? null;
   const [pickedVersion, setPickedVersion] = useState<string | null>(null);
+  const [viewBucket, setViewBucket] = useState<ViewBucket>("front_34");
+  const [photoIdx, setPhotoIdx] = useState(0);
+  // Real photos taken from roughly the direction the camera is looking; the model orbits, the photo tells the truth.
+  const anglePhotos = listing ? listing.photos.filter((p) => p.viewLabel === viewBucket) : [];
+  const anglePhoto = anglePhotos[photoIdx % Math.max(anglePhotos.length, 1)];
   const viewable = asset && asset.processingStatus === "ready" && (asset.reviewStatus === "approved" || editing || pickedVersion === asset.id);
 
   return (
@@ -205,7 +210,7 @@ export default function App() {
                   {viewable && asset && !assetError ? (
                     <Viewer asset={asset} tags={tags} selectedTagId={selectedTagId} onSelectTag={selectTag} placing={placing}
                       onPlace={(p: Vec3) => { const next = addTag(tags, asset.id, p); commitTags(next); setSelectedTagId(next[next.length - 1].id); setPlacing(false); }}
-                      pose={pose} onCapturePose={onCapturePose} />
+                      pose={pose} onCapturePose={onCapturePose} onViewChange={(b) => { setViewBucket(b); setPhotoIdx(0); }} />
                   ) : (
                     <div className="viewport-state center">
                       {genError ? `Generation request failed: ${genError}` : assetError ?? (
@@ -220,6 +225,18 @@ export default function App() {
                     <div className="hud">
                       {(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((k) => <button key={k} onClick={() => setPose({ ...PRESETS[k] })}>{k}</button>)}
                       {editing && <button className={placing ? "primary" : ""} onClick={() => setPlacing((p) => !p)}>{placing ? "Click the model…" : "+ Add tag"}</button>}
+                    </div>
+                  )}
+                  {viewable && !assetError && (
+                    <div className="angle-photo">
+                      {anglePhoto ? (
+                        <>
+                          <img src={anglePhoto.url} alt="" onClick={() => setPhotoIdx((i) => i + 1)} title="Click for the next photo from this angle" />
+                          <div className="meta">Real photo · {VIEW_LABELS[viewBucket]}{anglePhotos.length > 1 ? ` · ${(photoIdx % anglePhotos.length) + 1}/${anglePhotos.length}` : ""}</div>
+                        </>
+                      ) : (
+                        <div className="meta">No listing photo from this angle ({VIEW_LABELS[viewBucket]})</div>
+                      )}
                     </div>
                   )}
                   {asset?.representation === "illustrative" && viewable && <div className="disclaimer">Illustrative template: layout and proportions are not this vehicle's. Check the original photos.</div>}

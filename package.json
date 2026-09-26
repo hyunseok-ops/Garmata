@@ -11,7 +11,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test --experimental-strip-types src/data/*.test.ts",
-    "preview": "vite preview --mode web"
+    "preview": "vite preview --mode web",
+    "dist": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --publish never"
   },
   "dependencies": {
     "@react-three/drei": "^10.7.7",
@@ -32,6 +33,40 @@
     "electron": "^38.2.1",
     "typescript": "^5.9.3",
     "vite": "^7.1.9",
-    "vite-plugin-electron": "^0.29.0"
+    "vite-plugin-electron": "^0.29.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.garage.intelligence",
+    "productName": "Garage Intelligence",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/pg/**"
+    ],
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.business",
+      "identity": null
+    }
   }
 }

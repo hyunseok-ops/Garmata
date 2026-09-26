@@ -69,6 +69,27 @@ function Splat({ url, transform }: { url: string; transform?: Listing3DAsset["tr
   return null;
 }
 
+export type ViewBucket = "front" | "front_34" | "side" | "rear_34" | "rear";
+
+// Which labelled listing view best matches the current camera angle. Vehicle faces +X.
+function bucketFor(camera: THREE.Camera): ViewBucket {
+  const az = Math.abs((Math.atan2(camera.position.z, camera.position.x) * 180) / Math.PI); // 0 = front, 180 = rear
+  return az < 25 ? "front" : az < 70 ? "front_34" : az < 110 ? "side" : az < 155 ? "rear_34" : "rear";
+}
+
+function ViewReporter({ onChange }: { onChange: (b: ViewBucket) => void }) {
+  const { camera } = useThree();
+  const last = useRef<ViewBucket | null>(null);
+  useFrame(() => {
+    const b = bucketFor(camera);
+    if (b !== last.current) {
+      last.current = b;
+      onChange(b);
+    }
+  });
+  return null;
+}
+
 // Eases camera + target toward a requested pose, then hands control back to OrbitControls.
 function CameraRig({ pose, controls }: { pose: Pose | null; controls: React.RefObject<OrbitControlsImpl | null> }) {
   const { camera } = useThree();
@@ -137,6 +158,7 @@ export default function Viewer(props: {
   onPlace: (position: Vec3) => void;
   pose: Pose | null;
   onCapturePose?: (capture: () => Pose) => void;
+  onViewChange?: (bucket: ViewBucket) => void;
 }) {
   const controls = useRef<OrbitControlsImpl | null>(null);
   const model = useRef<THREE.Group>(null);
@@ -185,6 +207,7 @@ export default function Viewer(props: {
 
       <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.1} minDistance={3} maxDistance={40} maxPolarAngle={Math.PI / 2 - 0.02} target={PRESETS.Reset.target} />
       <CameraRig pose={props.pose} controls={controls} />
+      {props.onViewChange && <ViewReporter onChange={props.onViewChange} />}
     </Canvas>
   );
 }

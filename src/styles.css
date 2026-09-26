@@ -84,3 +84,6 @@ dd { margin: 0; text-align: right; }
 .pill.approved { background: #1e3a2a; color: #7fd39a; }
 .pill.rejected { background: #3a1e1e; color: #f08080; }
 .pill.pending { background: #2a2c34; color: var(--muted); }
+.angle-photo { position: absolute; right: 12px; bottom: 60px; width: 300px; background: rgba(23,24,28,.92); border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.angle-photo img { width: 100%; aspect-ratio: 3/2; object-fit: cover; border-radius: 5px; cursor: pointer; display: block; }
+.angle-photo .meta { padding: 5px 2px 0; }

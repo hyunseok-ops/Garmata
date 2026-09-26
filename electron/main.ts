@@ -10,7 +10,10 @@ import { smoke } from "./smoke.ts";
 
 app.setName("garage-intelligence"); // userData path must not depend on how Electron was launched
 dns.setDefaultResultOrder("ipv4first"); // Meshy over IPv6 stalls on this network
-try { process.loadEnvFile(path.join(import.meta.dirname, "../.env")); } catch { /* no .env */ }
+// Dev: repo-root .env. Packaged: <userData>/.env (Application Support/garage-intelligence/.env), never inside the app bundle.
+for (const envPath of [path.join(import.meta.dirname, "../.env"), path.join(app.getPath("userData"), ".env")]) {
+  try { process.loadEnvFile(envPath); break; } catch { /* try next */ }
+}
 
 // ---- Garage (read-only Postgres) ----------------------------------------------------------------
 const db = process.env.GARAGE_DATABASE_URL ? new pg.Pool({ connectionString: process.env.GARAGE_DATABASE_URL, max: 3 }) : null;
