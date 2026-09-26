@@ -23,7 +23,20 @@ npm run build      # typecheck + renderer/main bundles
 | 2 Garage integration | Not started. `ListingsApi` in `src/data/types.ts` is the seam; `src/data/fixtures.ts` is the only implementation. Field names follow `Listing`, `ListingImage`, `ListingAttribute` in the Garage Prisma schema. Auth is absent; the app has no sign-in. |
 | 3 Tag editor | Done against fixtures. Click-to-place in model-local coords, label/category/description, photo + field evidence, saved camera pose, delete. Tags persist per asset version in `localStorage`. |
 | 4 Generation + review | Stubbed. `requestGeneration` creates a queued version and refuses to duplicate a live job or replace an approved one. No worker, storage, or reviewer UI. |
-| 5 Pilot packaging | Not started. No electron-builder config. |
+| 5 Pilot packaging | `npm run dist` produces an unsigned macOS build. No auto-update, no code signing. |
+
+## Garage integration (Phase 4 backend)
+
+Branch `hyunseok/garage-intelligence-3d` in the Garage monorepo (worktree at `../garage-3d`, local commit only, not pushed):
+`Listing3DAsset` / `Listing3DTag` Prisma models + migration, and admin oRPC routes `admin.listings3d.{listAssets,createAsset,updateAsset,reviewAsset,listTags,saveTags}`.
+Files go to a private Supabase bucket `listing-3d` through signed upload URLs (bucket must be created per environment; the dev Supabase key is a placeholder, so uploads are untested).
+
+Desktop side: set `GARAGE_API_URL` (local backend: `http://localhost:3001`) and `GARAGE_API_KEY` (a Clerk **admin API key**, `ak_...`, created in the Clerk dashboard for an admin user) in `.env`.
+Then approvals and tag edits write through, and `GI_SYNC=all npx electron dist-electron/main.js` pushes every local asset, file, review state and tag set. Verified so far: routes mount and reject unauthenticated calls; a full push needs a real key.
+
+## Packaging
+
+`npm run dist` builds an unsigned arm64 macOS `.dmg` and `.zip` into `release/`. The packaged app reads its `.env` from `~/Library/Application Support/garage-intelligence/.env`.
 
 ## Splat pilot (docs/PLAN-SPLAT.md)
 

@@ -160,23 +160,25 @@ async function pollJob(assetId: string) {
 }
 
 // ---- IPC -----------------------------------------------------------------------------------------
-ipcMain.handle("status", () => ({ garage: !!db, provider: !!meshyKey() }));
+ipcMain.handle("status", () => ({ garage: !!db, provider: !!meshyKey(), sync: garageConfigured() }));
 ipcMain.handle("listings.search", (_e, q: string) => searchListings(q));
 ipcMain.handle("listings.get", (_e, id: string) => getListing(id));
 ipcMain.handle("assets.current", (_e, listingId: string) => currentAsset(loadStore(), listingId));
 ipcMain.handle("assets.list", (_e, listingId: string) => loadStore().assets.filter((a) => a.listingId === listingId).sort((a, b) => b.version - a.version));
 ipcMain.handle("assets.generate", (_e, listingId: string) => requestGeneration(listingId));
-ipcMain.handle("assets.review", (_e, assetId: string, reviewStatus: "approved" | "rejected") => {
+ipcMain.handle("assets.review", async (_e, assetId: string, reviewStatus: "approved" | "rejected") => {
   const s = loadStore();
   const a = s.assets.find((x) => x.id === assetId);
   if (a) { a.reviewStatus = reviewStatus; saveStore(s); }
+  if (a && garageConfigured()) await pushAsset(assetId).catch((e) => console.error("garage sync:", e.message));
   return a ?? null;
 });
 ipcMain.handle("tags.list", (_e, assetVersionId: string) => loadStore().tags.filter((t) => t.assetVersionId === assetVersionId));
-ipcMain.handle("tags.save", (_e, assetVersionId: string, tags: Listing3DTag[]) => {
+ipcMain.handle("tags.save", async (_e, assetVersionId: string, tags: Listing3DTag[]) => {
   const s = loadStore();
   s.tags = [...s.tags.filter((t) => t.assetVersionId !== assetVersionId), ...tags.filter((t) => t.assetVersionId === assetVersionId)];
   saveStore(s);
+  if (garageConfigured()) await pushAsset(assetVersionId).catch((e) => console.error("garage sync:", e.message));
 });
 
 // ---- Window --------------------------------------------------------------------------------------
@@ -208,6 +210,60 @@ async function generateCli(ids: string[]) {
     // Also wait for jobs resumed from a previous run, so nothing is left half-polled when this process exits.
     if (mine.every((a) => a.processingStatus === "ready" || a.processingStatus === "failed") && Object.keys(s.jobs).length === 0) return;
   }
+}
+
+// ---- Garage sync (admin oRPC, OpenAPI routes) --------------------------------------------------
+// GARAGE_API_URL + GARAGE_API_KEY (a Clerk admin API key, "ak_...") turn on write-through to Garage's Listing3DAsset /
+// Listing3DTag tables and the private "listing-3d" bucket. Without them the app stays local-only.
+const garageUrl = () => process.env.GARAGE_API_URL?.replace(/\/$/, "");
+const garageConfigured = () => !!(garageUrl() && process.env.GARAGE_API_KEY);
+
+async function garage<T>(op: string, input: unknown): Promise<T> {
+  const res = await fetch(`${garageUrl()}/admin/listings3d/${op}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.GARAGE_API_KEY}` },
+    body: JSON.stringify(input),
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new Error(`Garage ${op} ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json() as Promise<T>;
+}
+
+type RemoteAsset = { id: string; version: number; storageKey: string | null; downloadUrl: string | null; reviewStatus: string; processingStatus: string };
+
+// Push one local asset (metadata, file, review state, tags) to Garage. Idempotent: skips the file if already uploaded.
+async function pushAsset(assetId: string) {
+  const s = loadStore();
+  const a = s.assets.find((x) => x.id === assetId);
+  if (!a) throw new Error(`no asset ${assetId}`);
+  let remote: RemoteAsset;
+  let uploadUrl: string | null = null;
+  if (a.remoteId) {
+    remote = (await garage<RemoteAsset[]>("listAssets", { listingId: a.listingId })).find((r) => r.id === a.remoteId)!;
+  } else {
+    const created = await garage<{ asset: RemoteAsset; uploadUrl: string | null }>("createAsset", {
+      listingId: a.listingId, representation: a.representation.toUpperCase(), format: a.format === "glb" ? "GLB" : "SPLAT",
+      sourceImageIds: a.sourceImageIds, sourceFingerprint: a.sourceFingerprint, pipelineVersion: a.pipelineVersion,
+      transform: a.transform ?? null, processingStatus: a.processingStatus.toUpperCase(), error: a.error ?? null,
+    });
+    remote = created.asset;
+    uploadUrl = created.uploadUrl;
+    a.remoteId = remote.id;
+    saveStore(s);
+  }
+  const file = assetFile(a.id);
+  if (file && !remote.storageKey && uploadUrl) {
+    const put = await fetch(uploadUrl, { method: "PUT", body: fs.readFileSync(file), headers: { "Content-Type": "application/octet-stream" } });
+    if (!put.ok) throw new Error(`upload ${put.status}`);
+    await garage("updateAsset", { assetId: remote.id, uploaded: true, processingStatus: "READY" });
+  }
+  await garage("reviewAsset", { assetId: remote.id, reviewStatus: a.reviewStatus.toUpperCase() });
+  const tags = s.tags.filter((t) => t.assetVersionId === a.id).map((t) => ({
+    id: t.id, label: t.label, category: t.category, position: t.position, camera: t.camera ?? null,
+    description: t.description ?? null, order: t.order, evidenceImages: t.evidence.imageIds, evidenceFields: t.evidence.fields,
+  }));
+  await garage("saveTags", { assetId: remote.id, tags });
+  console.log(`pushed ${a.id} -> ${remote.id} (${tags.length} tags${file && !remote.storageKey ? ", file uploaded" : ""})`);
 }
 
 // ---- Tag seeding -------------------------------------------------------------------------------
@@ -279,6 +335,13 @@ function importCli(listingId: string, file: string, pipelineVersion: string, rep
 
 app.whenReady().then(() => {
   for (const assetId of Object.keys(loadStore().jobs)) void pollJob(assetId); // resume after restart, in every mode
+  if (process.env.GI_SYNC) {
+    // GI_SYNC=<assetId,...|all> pushes local assets, files, review state and tags to Garage.
+    const s = loadStore();
+    const ids = process.env.GI_SYNC === "all" ? s.assets.filter((a) => a.processingStatus === "ready").map((a) => a.id) : process.env.GI_SYNC.split(",");
+    void (async () => { for (const id of ids) await pushAsset(id); })().catch((e) => console.error(e)).finally(() => app.exit(0));
+    return;
+  }
   if (process.env.GI_SEED_TAGS) {
     // GI_SEED_TAGS=<assetId,...|approved> seeds template tags; "approved" = every approved asset without tags.
     const s = loadStore();

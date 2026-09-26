@@ -43,6 +43,7 @@ export type Listing3DAsset = {
   reviewStatus: ReviewStatus;
   error?: string;
   createdAt: string;
+  remoteId?: string; // Garage Listing3DAsset.id once synced
 };
 
 export const TAG_CATEGORIES = ["Cab", "Pump Panel", "Compartments", "Engine", "Wheels/Tires", "Rear", "Other"] as const;
