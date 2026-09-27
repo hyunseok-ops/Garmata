@@ -111,7 +111,13 @@ def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, se
         posed = root / "posed"
         shutil.rmtree(posed, ignore_errors=True)
         shutil.copytree(out_dir, posed, ignore=shutil.ignore_patterns("*.mp4"))
-        frames = json.loads((posed / "transforms.json").read_text())["frames"]
+        posed_meta = json.loads((posed / "transforms.json").read_text())
+        # SEVA writes 3x4 camera-to-world matrices; Nerfstudio's pose math needs 4x4. Values are our ring poses.
+        for f in posed_meta["frames"]:
+            if len(f["transform_matrix"]) == 3:
+                f["transform_matrix"] = f["transform_matrix"] + [[0.0, 0.0, 0.0, 1.0]]
+        (posed / "transforms.json").write_text(json.dumps(posed_meta, indent=2))
+        frames = posed_meta["frames"]
         if len(frames) != len(meta["frames"]):
             raise RuntimeError(f"SEVA returned {len(frames)} frames, expected {len(meta['frames'])}")
         # One image per azimuth for manual inspection (§8): frame order is preserved (sorted train+test indices).

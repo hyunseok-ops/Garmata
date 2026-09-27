@@ -69,21 +69,39 @@ export type RingView = {
   conditionedOn?: string[]; // real images the generator saw
 };
 
-// One real photo per exterior label (first by gallery order); real photos take their ring slot, the rest are generated.
-// `overrides` (label -> azimuth, from experiments/novel-view/<id>/azimuths.json) beat detection.
-export function planRing(photos: ListingPhoto[], facing: Facing = {}, overrides: Record<string, number> = {}, ring = RING): RingView[] {
+// Per-listing overrides (experiments/novel-view/<id>/azimuths.json):
+//   labels: { "front_34": 315 }            move the auto-picked photo for a label
+//   photos: { "<ListingImage.id>": 135 }   pin exact photos to ring slots (e.g. a driver-side shot filed as "side")
+// A plain { label: azimuth } object is read as `labels`.
+export type RingOverrides = { labels?: Record<string, number>; photos?: Record<string, number> };
+export function normalizeOverrides(o: unknown): RingOverrides {
+  const x = (o ?? {}) as Record<string, unknown>;
+  return "labels" in x || "photos" in x ? (x as RingOverrides) : { labels: x as Record<string, number> };
+}
+
+const slot = (az: number, ring = RING) => ((Math.round(az / ring.stepDeg) * ring.stepDeg) % 360 + 360) % 360;
+
+// One real photo per exterior label (first by gallery order) unless pinned; real photos take their ring slot, the rest
+// are generated. Pinned photos win their slot.
+export function planRing(photos: ListingPhoto[], facing: Facing = {}, overrides: RingOverrides | Record<string, number> = {}, ring = RING): RingView[] {
+  const o = normalizeOverrides(overrides);
   const reals = new Map<number, ListingPhoto>();
+  for (const [id, az] of Object.entries(o.photos ?? {})) {
+    const p = photos.find((x) => x.id === id);
+    if (p) reals.set(slot(az, ring), p);
+  }
   for (const label of EXTERIOR_LABELS) {
-    const p = photos.find((x) => x.viewLabel === label);
-    const az = overrides[label] ?? azimuthFor(label, facing);
+    const p = photos.find((x) => x.viewLabel === label && !(x.id in (o.photos ?? {})));
+    const az = slot(o.labels?.[label] ?? azimuthFor(label, facing), ring);
     if (p && !reals.has(az)) reals.set(az, p);
   }
-  const realFiles = [...reals.entries()].map(([az, p]) => `real/${p.viewLabel}.jpg`);
+  const fileFor = (p: ListingPhoto) => `real/${p.viewLabel}${p.id in (o.photos ?? {}) ? `-${p.id.slice(0, 8)}` : ""}.jpg`;
+  const realFiles = [...reals.values()].map(fileFor);
   return ringAzimuths(ring.stepDeg).map((azimuth) => {
     const file = `images/${String(azimuth).padStart(3, "0")}.png`;
     const real = reals.get(azimuth);
     return real
-      ? { azimuth, file, source: "real", sourceImage: `real/${real.viewLabel}.jpg`, sourceImageId: real.id }
+      ? { azimuth, file, source: "real", sourceImage: fileFor(real), sourceImageId: real.id }
       : { azimuth, file, source: "generated", conditionedOn: realFiles };
   });
 }

@@ -57,3 +57,12 @@ test("photos where the front points left sit on the officer side; unknowns follo
   const overridden = planRing([p("s", "side")], {}, { side: 270 });
   assert.equal(overridden.find((v) => v.source === "real")?.azimuth, 270);
 });
+
+test("pinned photos take their slots; labels fill the rest", () => {
+  const p = (id: string, viewLabel: string) => ({ id, url: id, viewLabel });
+  const photos = [p("f", "front"), p("s1", "side"), p("s2", "side"), p("r", "rear")];
+  const views = planRing(photos, {}, { photos: { s2: 135 } });
+  const reals = views.filter((v) => v.source === "real").map((v) => [v.azimuth, v.sourceImageId]);
+  assert.deepEqual(reals, [[0, "f"], [90, "s1"], [135, "s2"], [180, "r"]]); // s2 pinned; s1 is the label pick
+  assert.equal(views.find((v) => v.azimuth === 135)?.sourceImage, "real/side-s2.jpg");
+});

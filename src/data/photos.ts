@@ -20,6 +20,6 @@ export const VIEW_LABELS: Record<string, string> = {
 // image uses a sized rendition from Supabase's image transformer; <Img> falls back to the original if that fails.
 export function thumbUrl(url: string, width: number): string {
   return url.includes("/storage/v1/object/public/")
-    ? url.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/") + `?width=${width}&quality=75`
+    ? url.replace("/storage/v1/object/public/", "/storage/v1/render/image/public/") + `?width=${width}&resize=contain&quality=75` // width alone makes Supabase crop a centre strip
     : url;
 }

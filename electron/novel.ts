@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { Generation, GenerationStage, ListingDetail, SplatPipeline } from "../src/data/types.ts";
-import { buildSplit, buildTransforms, EXTERIOR_LABELS, planRing, RING, validatePosed, viewerScale, type Facing, type RingView } from "../src/data/novel.ts";
+import { buildSplit, buildTransforms, EXTERIOR_LABELS, normalizeOverrides, planRing, RING, validatePosed, viewerScale, type Facing, type RingView } from "../src/data/novel.ts";
 import { pruneSplatFile } from "./ply.ts";
 
 // MVP quality bar (not photogrammetry-grade): 7k Splatfacto iterations is ~half the GPU time of the 15k default and
@@ -80,31 +80,38 @@ export async function prep(d: Deps, listingId: string) {
   const dir = expDir(d, listingId);
   // Keep a hand-written azimuths.json across re-runs; everything else is regenerated.
   const overridesPath = path.join(dir, "azimuths.json");
-  const overrides: Record<string, number> = fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, "utf8")) : {};
+  const overrides = normalizeOverrides(fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, "utf8")) : {});
   for (const sub of ["real", "normalized", "generated", "poses", "output", "scene"]) fs.rmSync(path.join(dir, sub), { recursive: true, force: true });
   for (const sub of ["real", "normalized", "generated", "poses", "output", "scene/images"]) fs.mkdirSync(path.join(dir, sub), { recursive: true });
 
-  // 1. One photo per exterior label: download, reject unusable, resize (plan §6), crop to the ring aspect.
+  // 1. Download, reject unusable, resize (plan §6), crop to the ring aspect. Label picks feed facing detection.
   const rejected: { label: string; reason: string }[] = [];
-  const crops = new Map<string, Electron.NativeImage>();
-  for (const label of EXTERIOR_LABELS) {
-    const photo = listing.photos.find((p) => p.viewLabel === label);
-    if (!photo) continue;
+  const crops = new Map<string, Electron.NativeImage>(); // by ListingImage.id
+  const load = async (photo: ListingDetail["photos"][number], name: string) => {
     try {
       const img = await fetchImage(photo.url);
       const { width, height } = img.getSize();
       if (Math.min(width, height) < 400) throw new Error(`too small (${width}x${height})`);
-      fs.writeFileSync(path.join(dir, "real", `${label}.jpg`), fitMax(img, 1600).toJPEG(90));
+      fs.writeFileSync(path.join(dir, "real", `${name}.jpg`), fitMax(img, 1600).toJPEG(90));
       const cropped = cropTo(img, RING.w / RING.h);
-      fs.writeFileSync(path.join(dir, "normalized", `${label}.jpg`), fitMax(cropped, 1600).toJPEG(90));
-      crops.set(label, cropped);
+      fs.writeFileSync(path.join(dir, "normalized", `${name}.jpg`), fitMax(cropped, 1600).toJPEG(90));
+      crops.set(photo.id, cropped);
     } catch (e) {
-      rejected.push({ label, reason: (e as Error).message });
+      rejected.push({ label: name, reason: (e as Error).message });
     }
+  };
+  for (const label of EXTERIOR_LABELS) {
+    const photo = listing.photos.find((p) => p.viewLabel === label && !(p.id in (overrides.photos ?? {})));
+    if (photo) await load(photo, label);
   }
-  const usable = listing.photos.filter((p) => p.viewLabel && crops.has(p.viewLabel));
+  for (const id of Object.keys(overrides.photos ?? {})) {
+    const photo = listing.photos.find((p) => p.id === id);
+    if (photo) await load(photo, `${photo.viewLabel}-${id.slice(0, 8)}`);
+    else rejected.push({ label: id, reason: "pinned photo not on this listing" });
+  }
+  const usable = listing.photos.filter((p) => crops.has(p.id));
 
-  // 2. Which side each 3/4 and side photo shows (plan §7). Detection failure is not fatal: unknowns follow the majority.
+  // 2. Which side each auto-picked 3/4 and side photo shows (plan §7). Failure is not fatal: unknowns follow the majority.
   let facing: Facing & { evidence?: unknown } = {};
   try {
     facing = JSON.parse((await run(d, "uv", ["run", "--quiet", "--with", "opencv-python-headless", "--with", "numpy", "python", "pipeline/facing.py", path.join(dir, "normalized")], 300_000)).trim().split("\n").pop()!);
@@ -115,8 +122,7 @@ export async function prep(d: Deps, listingId: string) {
   // 3. Ring plan and cameras. SEVA reads intrinsics at the image's native size, so scene images match the ring resolution.
   let views: RingView[] = planRing(usable, facing, overrides);
   for (const v of views) if (v.source === "real") {
-    const label = listing.photos.find((p) => p.id === v.sourceImageId)!.viewLabel!;
-    fs.writeFileSync(path.join(dir, "scene", v.file), crops.get(label)!.resize({ width: RING.w, height: RING.h, quality: "best" }).toPNG());
+    fs.writeFileSync(path.join(dir, "scene", v.file), crops.get(v.sourceImageId!)!.resize({ width: RING.w, height: RING.h, quality: "best" }).toPNG());
   }
   const realFiles = views.filter((v) => v.source === "real").map((v) => v.sourceImage!);
   views = views.map((v) => (v.source === "generated" ? { ...v, conditionedOn: realFiles } : v));
@@ -189,7 +195,7 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
       } else {
         const m = await prep(d, g.listingId);
         await volume(d, "put", path.join(dir, "scene"), `${remote}/scene`);
-        const unsure = ((m.facing as { uncertain?: string[] }).uncertain ?? []).filter((l) => !(l in m.overrides));
+        const unsure = ((m.facing as { uncertain?: string[] }).uncertain ?? []).filter((l) => !(l in (m.overrides.labels ?? {})));
         if (unsure.length) update(d, g, { message: `Side unknown for ${unsure.join(", ")}; assumed from the other photos (pin in azimuths.json)` });
       }
       update(d, g, { done: { ...g.done, prep: true } });
