@@ -13,6 +13,7 @@ behind the Modal `huggingface` secret must accept the license at https://hugging
   uvx modal run pipeline/novel_view_modal.py --check          # is the gated model reachable?
 """
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -37,7 +38,8 @@ matte_image = modal.Image.debian_slim(python_version="3.11").pip_install("rembg[
 vol = modal.Volume.from_name("gi-splats", create_if_missing=True)
 progress = modal.Dict.from_name("gi-progress", create_if_missing=True)
 DATA = pathlib.Path("/data")
-HF = modal.Secret.from_name("huggingface")
+# Deploy with GI_HF_SECRET=gi-huggingface to use your own token (an account that accepted the SEVA license).
+HF = modal.Secret.from_name(os.environ.get("GI_HF_SECRET", "huggingface"))
 
 
 def _report(key: str, stage: str, current: int | None = None, total: int | None = None, message: str | None = None) -> None:
