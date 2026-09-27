@@ -8,7 +8,9 @@ import pathlib
 
 import modal
 
-MODEL = os.environ.get("GI_SVD_MODEL", "stabilityai/stable-video-diffusion-img2vid-xt-1-1")
+# xt-1-1 is gated (our HF secret lacks the license); the original xt downloads anonymously.
+MODEL = "stabilityai/stable-video-diffusion-img2vid-xt"
+TOKEN = False  # set to os.environ["HF_TOKEN"] once an account with the 1-1 license is in the secret
 image = modal.Image.debian_slim(python_version="3.11").pip_install(
     "torch==2.6.0", "diffusers==0.32.2", "transformers==4.48.3", "accelerate", "imageio[ffmpeg]", "pillow"
 )
@@ -39,7 +41,7 @@ def generate(photos: list[bytes], seed: int = 42, motion_bucket_id: int = 127) -
     from PIL import Image, ImageOps
 
     pipe = StableVideoDiffusionPipeline.from_pretrained(
-        MODEL, torch_dtype=torch.float16, variant="fp16", cache_dir="/cache", token=os.environ.get("HF_TOKEN")
+        MODEL, torch_dtype=torch.float16, variant="fp16", cache_dir="/cache", token=TOKEN
     ).to("cuda")
     cache.commit()
     out = []
