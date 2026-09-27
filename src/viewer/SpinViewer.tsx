@@ -7,7 +7,7 @@ import type { ViewBucket } from "./Viewer.tsx";
 // altered); in between, generated frames fill the gap. Frames are preloaded and cross-faded, and drag has momentum,
 // so the lap feels continuous. Tags are projected into each frame from the exact ring camera used to make it.
 
-type SpinFrame = { azimuth: number; file: string; source: "real" | "generated"; sourceImageId: string | null };
+type SpinFrame = { azimuth: number; file: string; source: "real" | "generated"; sourceImageId: string | null; view?: [number, number, number] };
 type SpinData = { w: number; h: number; ring: typeof RING; frames: SpinFrame[] };
 
 const DEG_PER_PX = 0.35;
@@ -137,9 +137,11 @@ export default function SpinViewer(props: {
         const center = [ring.target[0] - m[0][3], ring.target[1] - m[1][3], ring.target[2] - m[2][3]];
         const centerZ = center[0] * m[0][2] + center[1] * m[1][2] + center[2] * m[2][2];
         if (cam[2] >= 0 || cam[2] < centerZ - 0.05) return []; // behind camera, or on the far side of the vehicle
-        const fl = focalPx(ring) * (data.w / ring.w);
-        const px = data.w / 2 + (fl * cam[0]) / -cam[2];
-        const py = data.h / 2 - (fl * cam[1]) / -cam[2];
+        // Ring-camera pixel, then the frame's zoom/crop about (vx, vy), then output resolution.
+        const fl = focalPx(ring);
+        const [z, vx, vy] = data.frames[nearest].view ?? [1, ring.w / 2, ring.h / 2];
+        const px = ((ring.w / 2 + (fl * cam[0]) / -cam[2] - vx) * z + ring.w / 2) * (data.w / ring.w);
+        const py = ((ring.h / 2 - (fl * cam[1]) / -cam[2] - vy) * z + ring.h / 2) * (data.h / ring.h);
         return [{ tag, x: dx + px * fit, y: dy + py * fit }];
       })
     : [];

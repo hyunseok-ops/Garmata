@@ -349,7 +349,7 @@ app.whenReady().then(() => {
         const out = path.join(exp, "spin");
         fs.rmSync(out, { recursive: true, force: true });
         const { execFileSync } = await import("node:child_process");
-        const res = execFileSync("uv", ["run", "--quiet", "--with", "opencv-python-headless", "--with", "numpy", "--with", "pillow", "--with", "requests",
+        const res = execFileSync("uv", ["run", "--quiet", "--with", "rembg", "--with", "onnxruntime", "--with", "opencv-python-headless", "--with", "numpy", "--with", "pillow", "--with", "requests",
           "python", "pipeline/spin_build.py", exp, cands, out], { cwd: deps.repoRoot, encoding: "utf8", maxBuffer: 64 << 20, timeout: 1_800_000 });
         const summary = JSON.parse(res.trim().split("\n").pop()!);
         const st = loadStore();

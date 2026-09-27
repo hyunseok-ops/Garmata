@@ -68,6 +68,38 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
   await js(`document.querySelector('.browser li')?.click()`);
   await wait(4000);
   await shot("2-listing");
+  if (process.env.GI_SMOKE_SPIN) {
+    // Spin review: open the newest photo-spin version, wait for every frame, then presets + a spin FPS sample.
+    await js(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent.startsWith('Versions'))?.click()`);
+    await wait(800);
+    await js(`(() => { const cards = [...document.querySelectorAll('.version')].filter((c) => c.textContent.includes('photo-spin'));
+      cards.sort((a, b) => parseInt(b.querySelector('.title').textContent.slice(1)) - parseInt(a.querySelector('.title').textContent.slice(1)));
+      [...cards[0].querySelectorAll('button')].find((b) => b.textContent === 'View')?.click(); })()`);
+    await wait(500);
+    await js(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent.startsWith('360'))?.click()`);
+    const t0 = Date.now();
+    await js(`new Promise((resolve) => { const check = () => document.querySelector('.spin canvas') && !document.querySelector('.spin-loading') ? resolve(true) : setTimeout(check, 100); check(); })`);
+    console.log(`SPIN LOADED ${Date.now() - t0}ms`);
+    await wait(500);
+    await shot("spin-0");
+    for (const name of ["Front", "Left", "Rear", "Right", "Reset"]) {
+      await js(`[...document.querySelectorAll('.hud button')].find((b) => b.textContent === ${JSON.stringify(name)})?.click()`);
+      await wait(1500);
+      await shot(`spin-${name}`);
+    }
+    const fps = await js(`new Promise((resolve) => {
+      const names = ["Front", "Right", "Rear", "Left", "Reset"]; let i = 0;
+      const click = () => [...document.querySelectorAll('.hud button')].find((b) => b.textContent === names[i++ % names.length])?.click();
+      const iv = setInterval(click, 900); click();
+      const dts = []; let last = performance.now(); const end = last + 6000;
+      const tick = (t) => { dts.push(t - last); last = t; if (t < end) requestAnimationFrame(tick); else { clearInterval(iv); dts.sort((a, b) => a - b);
+        const q = (p) => +dts[Math.floor(p * (dts.length - 1))].toFixed(1);
+        resolve({ frames: dts.length, fps: +(dts.length / 6).toFixed(1), p50ms: q(0.5), p95ms: q(0.95), maxms: q(1) }); } };
+      requestAnimationFrame(tick);
+    })`);
+    console.log("SPIN FPS " + JSON.stringify(fps) + " errors " + JSON.stringify(errors));
+    return;
+  }
   await js(`[...document.querySelectorAll('header button')].find(b => b.textContent === 'Edit tags')?.click()`);
   await wait(9000);
   await js(`document.querySelector('.parts button')?.click()`); // first tag: moves the camera to its saved pose
