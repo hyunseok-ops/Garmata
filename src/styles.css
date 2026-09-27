@@ -117,3 +117,11 @@ dd { margin: 0; text-align: right; }
 .pill.novel-view-splat { background: #2b2540; color: #c3b1ff; }
 .pill.capture-splat { background: #1e3a2a; color: #7fd39a; }
 .pill.posed-test { background: #3a321e; color: #e6c37a; }
+.spin { position: absolute; inset: 0; cursor: grab; touch-action: none; outline: none; user-select: none; }
+.spin:active { cursor: grabbing; }
+.spin canvas { display: block; }
+.spin-badge { position: absolute; top: 12px; right: 12px; font-size: 12px; padding: 4px 10px; border-radius: 999px; background: rgba(23,24,28,.85); border: 1px solid var(--line); }
+.spin-badge.real { color: #7fd39a; border-color: #2a4a36; }
+.spin-badge.generated { color: #c3b1ff; border-color: #3b3358; }
+.spin-loading { position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%); color: var(--muted); font-size: 12px; }
+.pill.photo-spin { background: #1e3a2a; color: #7fd39a; }

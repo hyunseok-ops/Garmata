@@ -82,10 +82,13 @@ export type RingView = {
 // A plain { label: azimuth } object is read as `labels`.
 // regenerateReals: SEVA re-renders the real slots too, from the exact ring cameras. Real photos stay as conditioning
 // (and as evidence in the viewer) but are not trained on, because their unknown distance/zoom contradicts the ring.
-export type RingOverrides = { labels?: Record<string, number>; photos?: Record<string, number>; regenerateReals?: boolean; ringStepDeg?: number };
+// keepBackground: view normalization scales the whole photo (not a cutout on white) and matting is skipped, so every
+// generated frame carries a background: real surroundings at the photographed angles, SEVA's continuation between them.
+// Meant for the photo spin view; a 3D splat can't reconcile invented backgrounds.
+export type RingOverrides = { labels?: Record<string, number>; photos?: Record<string, number>; regenerateReals?: boolean; ringStepDeg?: number; keepBackground?: boolean };
 export function normalizeOverrides(o: unknown): RingOverrides {
   const x = (o ?? {}) as Record<string, unknown>;
-  return ["labels", "photos", "regenerateReals", "ringStepDeg"].some((k) => k in x) ? (x as RingOverrides) : { labels: x as Record<string, number> };
+  return ["labels", "photos", "regenerateReals", "ringStepDeg", "keepBackground"].some((k) => k in x) ? (x as RingOverrides) : { labels: x as Record<string, number> };
 }
 
 // Ring for a listing: the default 24-view ring unless the experiment config asks for a different spacing.
@@ -123,7 +126,7 @@ export function planRing(photos: ListingPhoto[], facing: Facing = {}, overrides:
 // Nerfstudio / SEVA transforms.json. Generated frames have file_path null until the generator fills them.
 // With regenerateReals, all 24 ring frames are targets and each real photo is prepended as an input-only frame at its
 // slot's camera; those extra frames condition SEVA and are dropped before reconstruction.
-export function buildTransforms(views: RingView[], ring = RING, regenerateReals = false) {
+export function buildTransforms(views: RingView[], ring = RING, regenerateReals = false, keepBackground = false) {
   const fl = focalPx(ring);
   const ringFrames = views.map((v) => ({
     file_path: v.source === "real" && !regenerateReals ? v.file : null,
@@ -134,7 +137,7 @@ export function buildTransforms(views: RingView[], ring = RING, regenerateReals 
     ? views.filter((v) => v.source === "real").map((v) => ({ file_path: v.file, transform_matrix: poseFor(v.azimuth, ring), azimuth: v.azimuth, input_only: true }))
     : [];
   // Inputs first: SEVA sizes each empty frame from the previous loaded image, so frame 0 must have an image.
-  return { orientation_override: "none", fl_x: fl, fl_y: fl, cx: ring.w / 2, cy: ring.h / 2, w: ring.w, h: ring.h, vehicle_box: vehicleBox(ring), frames: [...inputFrames, ...ringFrames] };
+  return { orientation_override: "none", fl_x: fl, fl_y: fl, cx: ring.w / 2, cy: ring.h / 2, w: ring.w, h: ring.h, vehicle_box: vehicleBox(ring), ring_target: ring.target, keep_background: keepBackground, frames: [...inputFrames, ...ringFrames] };
 }
 
 export function buildSplit(views: RingView[], regenerateReals = false) {

@@ -31,7 +31,8 @@ export type Listing3DAsset = {
   listingId: string;
   version: number;
   representation: Representation;
-  format: "glb" | "splat" | "procedural"; // splat = Gaussian splat .ply/.spz (photo-derived appearance, not a mesh)
+  // splat = Gaussian splat .ply/.spz; spin = image turntable (spin.json + frames/, real listing photos at photographed angles)
+  format: "glb" | "splat" | "procedural" | "spin";
   storageKey: string | null; // asset URL/key; null for the procedural illustrative model
   // Reviewed normalization into the viewer frame (y-up, ~8 units long, resting on y=0). Splats need it; meshes auto-fit.
   transform?: { scale: number; position: Vec3; rotationDeg: Vec3 };

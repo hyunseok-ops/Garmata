@@ -6,3 +6,4 @@ dist-electron
 pipeline/inputs
 release
 experiments/novel-view/*/
+__pycache__/

@@ -20,6 +20,7 @@ export function pipelineLabel(p: string): string {
   if (p === "novel-view-splat") return "Novel View Splat";
   if (p === "capture-splat") return "Capture Splat";
   if (p === "posed-test") return "Pipeline Test";
+  if (p === "photo-spin") return "Photo Spin";
   if (p.startsWith("meshy")) return "Legacy Mesh";
   return p;
 }

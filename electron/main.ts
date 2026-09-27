@@ -5,7 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
 import type { Generation, Listing3DAsset, Listing3DTag, ListingDetail, ListingSummary, SplatPipeline } from "../src/data/types.ts";
-import { ringAzimuths, RING, buildTransforms } from "../src/data/novel.ts";
+import { ringAzimuths, RING, buildTransforms, viewerScale } from "../src/data/novel.ts";
 import { drive, newGeneration, prep, resumeAll, type Deps } from "./novel.ts";
 import { smoke } from "./smoke.ts";
 
@@ -81,7 +81,7 @@ ipcMain.handle("listings.get", (_e, id: string) => getListing(id));
 ipcMain.handle("assets.current", (_e, listingId: string) => currentAsset(loadStore(), listingId));
 ipcMain.handle("assets.list", (_e, listingId: string) => loadStore().assets.filter((a) => a.listingId === listingId).sort((a, b) => b.version - a.version));
 // Ready-for-review queue: 360 versions only (legacy meshes are not part of the MVP product).
-ipcMain.handle("assets.pending", () => loadStore().assets.filter((a) => a.format === "splat" && a.processingStatus === "ready" && a.reviewStatus === "pending"));
+ipcMain.handle("assets.pending", () => loadStore().assets.filter((a) => (a.format === "splat" || a.format === "spin") && a.processingStatus === "ready" && a.reviewStatus === "pending"));
 ipcMain.handle("generations.list", () => Object.values(loadStore().generations ?? {}).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
 ipcMain.handle("generations.start", async (_e, listingId: string, pipeline: SplatPipeline = "novel-view-splat") => {
   const l = await getListing(listingId);
@@ -147,6 +147,7 @@ const deps: Deps = {
     return id;
   },
   renderRing,
+  lockDir: () => path.join(dataDir(), "locks"),
 };
 
 // posed-test: render the listing's current mesh from the exact 24 ring cameras in a hidden window, so the
@@ -317,8 +318,16 @@ function importAsset(listingId: string, file: string, pipelineVersion: string, r
 
 app.whenReady().then(() => {
   protocol.handle("gi-asset", (req) => {
-    const id = path.basename(new URL(req.url).hostname || new URL(req.url).pathname);
-    const file = assetFile(id.replace(/[^a-z0-9_-]/gi, ""));
+    const u = new URL(req.url);
+    const id = (u.hostname || u.pathname.split("/")[1] || "").replace(/[^a-z0-9_-]/gi, "");
+    const rest = u.hostname ? u.pathname.replace(/^\//, "") : u.pathname.split("/").slice(2).join("/");
+    // Folder assets (spin): gi-asset://<assetId>/<relative file>, confined to that asset's folder.
+    if (rest) {
+      const root = path.join(dataDir(), id);
+      const file = path.resolve(root, rest);
+      return file.startsWith(root + path.sep) && fs.existsSync(file) ? net.fetch(pathToFileURL(file).href) : new Response("not found", { status: 404 });
+    }
+    const file = assetFile(id);
     return file ? net.fetch(pathToFileURL(file).href) : new Response("not found", { status: 404 });
   });
   const headless = (task: Promise<unknown>) => void task.catch((e) => console.error(e)).finally(() => app.exit(0));
@@ -329,6 +338,35 @@ app.whenReady().then(() => {
   if (process.env.GI_NOVEL_GENERATE) return headless(driveCli(process.env.GI_NOVEL_GENERATE.split(","), "novel-view-splat", true));
   if (process.env.GI_NOVEL_SPLAT || process.env.GI_GENERATE) return headless(driveCli((process.env.GI_NOVEL_SPLAT ?? process.env.GI_GENERATE)!.split(","), "novel-view-splat"));
   if (process.env.GI_NOVEL_RENDER_TEST) return headless(driveCli(process.env.GI_NOVEL_RENDER_TEST.split(","), "posed-test"));
+  if (process.env.GI_SPIN_BUILD) {
+    // Photo spin from the generated lap + every alignable real exterior photo (pipeline/spin_build.py).
+    return headless((async () => {
+      for (const id of process.env.GI_SPIN_BUILD!.split(",")) {
+        const l = await getListing(id);
+        const exp = path.join(deps.repoRoot, "experiments", "novel-view", id);
+        const cands = path.join(exp, "spin-candidates.json");
+        fs.writeFileSync(cands, JSON.stringify(l.photos.filter((p) => p.viewLabel).map((p) => ({ id: p.id, url: p.url, viewLabel: p.viewLabel }))));
+        const out = path.join(exp, "spin");
+        fs.rmSync(out, { recursive: true, force: true });
+        const { execFileSync } = await import("node:child_process");
+        const res = execFileSync("uv", ["run", "--quiet", "--with", "opencv-python-headless", "--with", "numpy", "--with", "pillow", "--with", "requests",
+          "python", "pipeline/spin_build.py", exp, cands, out], { cwd: deps.repoRoot, encoding: "utf8", maxBuffer: 64 << 20, timeout: 1_800_000 });
+        const summary = JSON.parse(res.trim().split("\n").pop()!);
+        const st = loadStore();
+        const version = Math.max(0, ...st.assets.filter((a) => a.listingId === id).map((a) => a.version)) + 1;
+        const assetId = `${id.slice(0, 8)}-v${version}`;
+        fs.cpSync(out, path.join(dataDir(), assetId), { recursive: true });
+        st.assets.push({
+          id: assetId, listingId: id, version, representation: "reconstructed", format: "spin", storageKey: `gi-asset://${assetId}/spin.json`,
+          sourceImageIds: summary.placed.map((p: { photo: string }) => p.photo), sourceFingerprint: `spin:${summary.placed.map((p: { photo: string }) => p.photo).join("|")}`,
+          pipelineVersion: "photo-spin", processingStatus: "ready", reviewStatus: "pending", createdAt: new Date().toISOString(),
+          transform: { scale: viewerScale(), position: [0, 0, 0], rotationDeg: [0, 0, 0] },
+        });
+        saveStore(st);
+        console.log(`spin ${assetId}: ${summary.frames} frames, ${summary.real} real photos`);
+      }
+    })());
+  }
   if (process.env.GI_NOVEL_RESPLAT) {
     // Re-train only: reuse the views already on the volume (novel/<id>/posed) with the current reconstruction settings.
     return headless((async () => {

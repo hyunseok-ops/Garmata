@@ -140,7 +140,8 @@ def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, se
         for f_in, f_out in zip(meta["frames"], frames):
             shutil.copy(posed / f_out["file_path"], generated / f"{int(f_in['azimuth']):03d}.png")
         vol.commit()
-        matte.remote(str(posed.relative_to(DATA)), progress_key)
+        if not meta.get("keep_background"):
+            matte.remote(str(posed.relative_to(DATA)), progress_key)
         vol.reload()
         for f_in, f_out in zip(meta["frames"], frames):  # inspection copies get the matted frames too
             shutil.copy(posed / f_out["file_path"], generated / f"{int(f_in['azimuth']):03d}.png")
@@ -193,17 +194,34 @@ def normalize_inputs(scene_rel: str) -> list[dict]:
         if not bbox:
             report.append({"azimuth": f["azimuth"], "skipped": "no vehicle found"})
             continue
-        vehicle = cut.crop(bbox)
         ex0, ey0, ex1, ey1 = _project_bbox(f["transform_matrix"], t["fl_x"], t["cx"], t["cy"], t["vehicle_box"])
-        k = (ey1 - ey0) / vehicle.height  # height is stable across azimuths; width depends on the exact angle
+        k = (ey1 - ey0) / (bbox[3] - bbox[1])  # height is stable across azimuths; width depends on the exact angle
+        ox = round((ex0 + ex1) / 2 - (bbox[0] + bbox[2]) / 2 * k)
+        oy = round(ey1 - bbox[3] * k)  # wheels on the projected ground line
+        if t.get("keep_background"):
+            # Pose normalization instead of image normalization: keep the full photo (no shrinking, no padded
+            # borders for the generator to copy) and move this input's camera along its view ray so the vehicle's
+            # apparent size is explained by distance. Generated frames stay at the ring radius, so sizes still match.
+            import numpy as np
+
+            c2w = np.array(f["transform_matrix"], dtype=float)
+            target = np.array(t.get("ring_target", [0.0, 0.35, 0.0]), dtype=float)
+            c2w[:3, 3] = target + (c2w[:3, 3] - target) * k
+            f["transform_matrix"] = c2w.tolist()
+            with Image.open(orig) as im:
+                canvas = im.convert("RGB").resize((t["w"], t["h"]), Image.LANCZOS)
+            report.append({"azimuth": int(f["azimuth"]), "distance_scale": round(float(k), 3)})
+            canvas.save(path)
+            continue
+        vehicle = cut.crop(bbox)
         vehicle = vehicle.resize((max(1, round(vehicle.width * k)), max(1, round(vehicle.height * k))), Image.LANCZOS)
         canvas = Image.new("RGB", (t["w"], t["h"]), "white")
-        ox = round((ex0 + ex1) / 2 - vehicle.width / 2)
-        oy = round(ey1 - vehicle.height)  # wheels on the projected ground line
-        canvas.paste(vehicle, (ox, oy), vehicle)
+        canvas.paste(vehicle, (ox + round(bbox[0] * k), oy + round(bbox[1] * k)), vehicle)
         canvas.save(path)
         # Plain Python numbers: the caller's container runs numpy 1.x and can't unpickle numpy 2 scalars.
         report.append({"azimuth": int(f["azimuth"]), "scale": round(float(k), 3), "expected_h": int(round(float(ey1 - ey0))), "photo_h": int(bbox[3] - bbox[1])})
+    if t.get("keep_background"):
+        (root / "transforms.json").write_text(json.dumps(t, indent=2))
     vol.commit()
     return report
 

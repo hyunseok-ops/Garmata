@@ -20,7 +20,31 @@ export type Deps = {
   saveGeneration: (g: Generation) => void;
   importSplat: (listingId: string, file: string, pipeline: SplatPipeline, transformScale: number) => string; // returns assetId
   renderRing?: (listingId: string, outDir: string) => Promise<void>; // posed-test only
+  lockDir: () => string;
 };
+
+// One driver per generation. The dev window restarts (and resumes jobs) whenever main-process code changes, and headless
+// runs can overlap it; two drivers race on the store and double-spawn GPU jobs. The lock holds the driver's pid; a lock
+// whose pid is gone is stale and taken over.
+function acquire(d: Deps, id: string): (() => void) | null {
+  fs.mkdirSync(d.lockDir(), { recursive: true });
+  const file = path.join(d.lockDir(), `${id}.lock`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: "wx" });
+      return () => fs.rmSync(file, { force: true });
+    } catch {
+      const pid = Number(fs.readFileSync(file, "utf8"));
+      try {
+        process.kill(pid, 0);
+        return pid === process.pid ? () => undefined : null; // alive: someone else is driving it
+      } catch {
+        fs.rmSync(file, { force: true }); // stale lock from a dead process
+      }
+    }
+  }
+  return null;
+}
 
 const TERMINAL: GenerationStage[] = ["ready", "failed"];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -136,7 +160,7 @@ export async function prep(d: Deps, listingId: string) {
   views = views.map((v) => (v.source === "generated" ? { ...v, conditionedOn: realFiles } : v));
   if (realFiles.length < 3) throw new Error(`needs at least 3 usable exterior photos (front, 3/4, side, rear); found ${realFiles.length}`);
 
-  const transforms = buildTransforms(views, ring, !!overrides.regenerateReals);
+  const transforms = buildTransforms(views, ring, !!overrides.regenerateReals, !!overrides.keepBackground);
   const split = buildSplit(views, !!overrides.regenerateReals);
   fs.writeFileSync(path.join(dir, "scene", "transforms.json"), JSON.stringify(transforms, null, 2));
   fs.writeFileSync(path.join(dir, "scene", `train_test_split_${split.train_ids.length}.json`), JSON.stringify(split, null, 2));
@@ -188,6 +212,19 @@ export function newGeneration(d: Deps, listingId: string, title: string, pipelin
 
 // Idempotent: every step checks g.done / g.calls, so the same function resumes an interrupted job.
 export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
+  const release = acquire(d, g.id);
+  if (!release) {
+    console.log(`${g.id} is already being driven by another process; not starting a second driver`);
+    return g;
+  }
+  try {
+    return await driveLocked(d, g, stopAfter);
+  } finally {
+    release();
+  }
+}
+
+async function driveLocked(d: Deps, g: Generation, stopAfter?: "views") {
   if (g.paused) update(d, g, { paused: false });
   const dir = expDir(d, g.listingId);
   const remote = `/novel/${g.listingId}`;
