@@ -198,7 +198,7 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
       if (!g.calls.views) {
         update(d, g, { stage: "generating_views", current: undefined, total: undefined, message: "Checking view-generator access" });
         const access = (await gi(d, "check")).seva as string; // cheap CPU call: never start an H100 just to hit a 403
-        if (!access.startsWith("ok")) throw new Error("Stable Virtual Camera weights are gated: accept the license at huggingface.co/stabilityai/stable-virtual-camera with the account behind Modal's `huggingface` secret, then Retry");
+        if (!access.startsWith("ok")) throw new Error("View generator license not accepted yet: accept it at huggingface.co/stabilityai/stable-virtual-camera with the Hugging Face account whose token is in Modal, then Retry");
         update(d, g, { current: 0, total: 24 - realCount(dir), message: "Starting view generator" });
         update(d, g, { calls: { ...g.calls, views: (await gi(d, "spawn-views", g.listingId, g.id)).callId } });
       }
