@@ -32,6 +32,8 @@ image = (
     )
 )
 app = modal.App("garage-intelligence-novel-view", image=image)
+# Separate image for matting so rembg's dependencies can't disturb SEVA's pinned stack (numpy 1.24, torch 2.6).
+matte_image = modal.Image.debian_slim(python_version="3.11").pip_install("rembg[cpu]==2.0.67", "pillow")
 vol = modal.Volume.from_name("gi-splats", create_if_missing=True)
 progress = modal.Dict.from_name("gi-progress", create_if_missing=True)
 DATA = pathlib.Path("/data")
@@ -111,11 +113,36 @@ def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, se
         for f_in, f_out in zip(meta["frames"], frames):
             shutil.copy(posed / f_out["file_path"], generated / f"{int(f_in['azimuth']):03d}.png")
         vol.commit()
+        matte.remote(str(posed.relative_to(DATA)), progress_key)
+        vol.reload()
+        for f_in, f_out in zip(meta["frames"], frames):  # inspection copies get the matted frames too
+            shutil.copy(posed / f_out["file_path"], generated / f"{int(f_in['azimuth']):03d}.png")
+        vol.commit()
         _report(progress_key, "generating_views", num_targets, num_targets, "Views generated")
         return {"inputs": num_inputs, "targets": num_targets, "w": meta["w"], "h": meta["h"], "seconds": round(time.time() - t0)}
     except Exception as e:
         _report(progress_key, "failed", message=str(e)[:300])
         raise
+
+
+@app.function(image=matte_image, cpu=4, memory=8192, timeout=1800, volumes={str(DATA): vol})
+def matte(posed_rel: str, progress_key: str = "") -> int:
+    """Background removal -> RGBA frames. SEVA invents a different parking lot for every angle; Splatfacto would turn
+    that disagreement into floaters. With alpha, empty pixels train as empty space and only the vehicle is kept."""
+    from PIL import Image
+    from rembg import new_session, remove
+
+    vol.reload()
+    root = DATA / posed_rel
+    frames = json.loads((root / "transforms.json").read_text())["frames"]
+    session = new_session("isnet-general-use")
+    for i, f in enumerate(frames):
+        path = root / f["file_path"]
+        with Image.open(path) as im:
+            remove(im.convert("RGB"), session=session).save(path)  # RGBA PNG, same size
+        _report(progress_key, "generating_views", i + 1, len(frames), "Separating the vehicle from its background")
+    vol.commit()
+    return len(frames)
 
 
 @app.local_entrypoint()

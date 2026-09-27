@@ -1,7 +1,7 @@
 """Thin CLI between the Electron main process and Modal. Every command prints one JSON line.
 
   uvx --from modal==1.5.5 python pipeline/gi.py spawn-views <listingId> <progressKey>
-  uvx --from modal==1.5.5 python pipeline/gi.py spawn-splat <job> <posedPath> <progressKey> <expectedFrames> [A10G|H100]
+  uvx --from modal==1.5.5 python pipeline/gi.py spawn-splat <job> <posedPath> <progressKey> <expectedFrames> [A10G|H100] [iterations]
   uvx --from modal==1.5.5 python pipeline/gi.py status <callId> <progressKey>
   uvx --from modal==1.5.5 python pipeline/gi.py check
 """
@@ -20,7 +20,8 @@ def main(argv: list[str]) -> dict:
     if cmd == "spawn-splat":
         job, posed, key, expected, *rest = args
         fn = "reconstruct_fast" if (rest[0] if rest else "A10G").upper() == "H100" else "reconstruct"
-        call = modal.Function.from_name("garage-intelligence-splat", fn).spawn(job, None, False, 15000, "sift", posed, key, int(expected))
+        iterations = int(rest[1]) if len(rest) > 1 else 15000
+        call = modal.Function.from_name("garage-intelligence-splat", fn).spawn(job, None, False, iterations, "sift", posed, key, int(expected))
         return {"callId": call.object_id}
     if cmd == "status":
         call_id, key = args

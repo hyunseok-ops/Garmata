@@ -132,8 +132,20 @@ const deps: Deps = {
   getListing,
   loadGenerations: () => loadStore().generations ?? {},
   saveGeneration: (g) => { const s = loadStore(); s.generations = { ...(s.generations ?? {}), [g.id]: g }; saveStore(s); },
-  importSplat: (listingId, file, pipeline, scale) =>
-    importAsset(listingId, file, pipeline, pipeline === "posed-test" ? "illustrative" : "reconstructed", { scale, position: [0, 0, 0], rotationDeg: [0, 0, 0] }),
+  importSplat: (listingId, file, pipeline, scale) => {
+    const id = importAsset(listingId, file, pipeline, pipeline === "posed-test" ? "illustrative" : "reconstructed", { scale, position: [0, 0, 0], rotationDeg: [0, 0, 0] });
+    try {
+      const m = JSON.parse(fs.readFileSync(path.join(path.dirname(path.dirname(file)), "manifest.json"), "utf8"));
+      const st = loadStore();
+      const a = st.assets.find((x) => x.id === id)!;
+      if (pipeline !== "posed-test") {
+        a.sourceImageIds = m.views.filter((v: { source: string }) => v.source === "real").map((v: { sourceImageId: string }) => v.sourceImageId);
+        a.sourceFingerprint = `ring:${a.sourceImageIds.join("|")}`;
+      }
+      saveStore(st);
+    } catch { /* manifest missing: provenance stays minimal */ }
+    return id;
+  },
   renderRing,
 };
 

@@ -14,45 +14,26 @@ npm test           # tag-binding self-check (node --test, no framework)
 npm run build      # typecheck + renderer/main bundles
 ```
 
-## Status against the plan
+## MVP (docs/PLAN.md, 2026-09-27)
 
-| Phase | State |
-| --- | --- |
-| 0 Reconstruction evaluation | Not started. Manual experiment; no code. Provider unselected. |
-| 1 Desktop shell + viewer | Done. Sidebar, listing browser, orbit/zoom/pan, Front/Rear/Left/Right/Reset, anchored tags that fade when occluded, inspection panel. |
-| 2 Garage integration | Reads: Electron main queries Garage Postgres read-only (`GARAGE_DATABASE_URL`) for listings, labelled photos and specs. Writes: admin oRPC on the Garage branch (see below). No user sign-in; access = DB URL + admin API key. |
-| 3 Tag editor | Done. Click-to-place, label/category/description, photo + field evidence, saved camera, delete; per-asset-version persistence; template seeding by vehicle type (`GI_SEED_TAGS`); angle-matched real photo panel while orbiting. |
-| 4 Generation + review | Meshy multi-image-to-3D (Ultra tier) end to end: 13 real listings generated, versioned, approved and tagged. Versions tab with view/approve/reject. Splat pipeline on Modal proven on a walkaround; listing photos alone do not reconstruct. |
-| 5 Pilot packaging | `npm run dist` produces an unsigned macOS build. No auto-update, no code signing. |
+Goal: turn a listing's sparse exterior photos into a navigable 360 Gaussian splat, with the real photos kept as evidence.
+Meshy/mesh generation is removed; existing mesh versions remain viewable as "Legacy Mesh".
 
-## Garage integration (Phase 4 backend)
+Pipeline (`electron/novel.ts`, dashboard "Generate 360" or headless):
 
-Branch `hyunseok/garage-intelligence-3d` in the Garage monorepo (worktree at `../garage-3d`, local commit only, not pushed):
-`Listing3DAsset` / `Listing3DTag` Prisma models + migration, and admin oRPC routes `admin.listings3d.{listAssets,createAsset,updateAsset,reviewAsset,listTags,saveTags}`.
-Files go to a private Supabase bucket `listing-3d` through signed upload URLs (bucket must be created per environment; the dev Supabase key is a placeholder, so uploads are untested).
+| Step | Where | What |
+| --- | --- | --- |
+| Prep `GI_NOVEL_PREP=<listingId>` | local | One photo per exterior label, resized/cropped, facing detected (`pipeline/facing.py`), 24-slot ring planned, `transforms.json` + manifest written to `experiments/novel-view/<id>/` |
+| Views `GI_NOVEL_GENERATE=<id>` | Modal H100 | Stable Virtual Camera renders the 19 missing ring angles from the real photos at the exact planned cameras, then rembg mattes every frame (`pipeline/novel_view_modal.py`); pauses for inspection |
+| Splat `GI_NOVEL_SPLAT=<id>` | Modal A10G | Posed-images mode: validate frames/matrices/sizes/order, Splatfacto 7k iterations, no feature matching (`pipeline/splat_modal.py`); prune floaters on import |
+| All `GI_GENERATE=<id>` | both | The three steps in one run |
+| Test `GI_NOVEL_RENDER_TEST=<id>` | both | Renders an existing model from the ring cameras instead of SEVA, to verify poses → Splatfacto → viewer |
 
-Desktop side: set `GARAGE_API_URL` (local backend: `http://localhost:3001`) and `GARAGE_API_KEY` (a Clerk **admin API key**, `ak_...`, created in the Clerk dashboard for an admin user) in `.env`.
-Then approvals and tag edits write through, and `GI_SYNC=all npx electron dist-electron/main.js` pushes every local asset, file, review state and tag set. Verified so far: routes mount and reject unauthenticated calls; a full push needs a real key.
+Progress is real stage data (Modal Dict `gi-progress`), persisted per generation, resumed after restarts.
+Per-listing overrides: `experiments/novel-view/<id>/azimuths.json`, e.g. `{"front_34": 315}` when facing detection is wrong.
 
-## Packaging
-
-`npm run dist` builds an unsigned arm64 macOS `.dmg` and `.zip` into `release/`. The packaged app reads its `.env` from `~/Library/Application Support/garage-intelligence/.env`.
-
-## Splat pilot (docs/PLAN-SPLAT.md)
-
-Photo-real path: Nerfstudio Splatfacto on Modal, rendered in the viewer with Spark (MIT). `pipeline/splat_modal.py` runs `ns-process-data` + `ns-train splatfacto` + `ns-export gaussian-splat` on an A10G against the `gi-splats` Volume.
-
-```sh
-uvx modal run --detach pipeline/splat_modal.py --job <job> --urls pipeline/inputs/<listing>.json   # sparse-photo baseline
-uvx modal volume put gi-splats walkaround.mp4 /jobs/<job>/source.mp4                              # guided capture (Phase 0)
-uvx modal run --detach pipeline/splat_modal.py --job <job> --video
-uvx modal volume get gi-splats /jobs/<job>/export/splat.ply ./splat.ply
-GI_IMPORT=<listingId>,./splat.ply,splatfacto-1.1.5 npx electron dist-electron/main.js              # register as a pending asset version
-```
-
-Status (2026-09-25): sparse-photo baseline on the 2009 Pierce Velocity (74 listing photos, exhaustive matching) aligned **2 of 74** frames; job cancelled before training. Pipeline then proven end to end on the Tanks & Temples "truck" walkaround (`--job sample-truck`, 251 posed frames): 15k Splatfacto iterations in ~6 min on an A10G, 142 MB `.ply`, loads and orbits in the app (imported as an illustrative asset on listing 226894 with a stored `transform`). Listing photos are scattered viewpoints, mixed focal lengths and close-ups, so COLMAP cannot chain them. This is the outcome the plan's decision gate anticipated: the next input must be a guided walkaround video (Phase 0), uploaded to the volume and run with `--video`. Tag occlusion does not work against splats (no mesh); proxy mesh is the planned fix.
-
-Operational notes: image build is cached after the first deploy; run jobs via `modal deploy` + spawn (the `--wait` flow above) because `modal run` ties the job to the client connection, and this laptop's Wi-Fi drops long-lived streams (a phone hotspot held).
+**Blocker:** SEVA weights are gated. The Hugging Face account behind the Modal `huggingface` secret must accept the Stability AI
+Non-Commercial License at https://huggingface.co/stabilityai/stable-virtual-camera (check with `uvx --from modal==1.5.5 python pipeline/gi.py check`).
 
 ## Layout
 

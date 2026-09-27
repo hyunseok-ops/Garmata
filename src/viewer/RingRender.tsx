@@ -12,12 +12,13 @@ export default function RingRender({ assetId }: { assetId: string }) {
   useEffect(() => {
     const canvas = document.createElement("canvas");
     document.body.appendChild(canvas);
-    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+    // Transparent background: Splatfacto learns alpha-0 pixels as empty space instead of filling it with white splats.
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true, alpha: true, premultipliedAlpha: false });
+    renderer.setClearColor(0x000000, 0);
     renderer.setPixelRatio(1);
     renderer.setSize(RING.w, RING.h, false);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#ffffff");
     scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
     scene.add(new THREE.HemisphereLight(0xffffff, 0x888888, 0.6));
     const sun = new THREE.DirectionalLight(0xffffff, 1.2);

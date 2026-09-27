@@ -1,9 +1,32 @@
 # Garage Intelligence — Development Status
 
-Date: 2026-09-27
-Repo: github.com/hyunseok-ops/Garmata (Electron + React + Three.js desktop app). Plans: `docs/PLAN.md` (MVP), `docs/PLAN-SPLAT.md` (Modal + Nerfstudio pilot).
+Date: 2026-09-27 (plan v2: docs/PLAN.md; the mesh-era plan is archived as docs/PLAN-v1-mesh.md)
 
-## 1. What exists and works today
+## Where the MVP stands
+
+| Phase (plan §40) | State |
+| --- | --- |
+| 1 Simplify UI | Done. Dashboard home (Active Generations, Ready for Review, Recent Listings), 360 View / Photos / Versions tabs, pipeline labels (Novel View Splat, Capture Splat, Pipeline Test, Legacy Mesh). Meshy generation removed. |
+| 2 Dataset prep | Done. `GI_NOVEL_PREP`: one photo per exterior label, resize/crop, facing detection (SIFT, conservative) + `azimuths.json` override, 24-slot ring, manifest. Verified on three pumpers. |
+| 3 Novel views | Built and deployed (Stable Virtual Camera on Modal H100 + rembg matting). **Blocked: model license not accepted** on the Hugging Face account behind the Modal secret. |
+| 4 Pose generator | Done and tested (`src/data/novel.ts`). OpenGL cameras, front +X, driver side +Z, shared by SEVA, Splatfacto and three.js. |
+| 5 Posed Splatfacto | Done. Posed-images mode with validation (frames, 4x4 matrices, sizes, ordering), no feature matching, 7k iterations, floater pruning on import. |
+| 6 Viewer integration | Verified with a pipeline test (existing model rendered from the ring cameras → splat): orientation, scale, all presets, real-photo matching correct. 95–120 fps while orbiting. |
+| 7 Dashboard progress | Done. Real stages from Modal (`gi-progress` Dict), iteration progress bar, step checklist, retry, resume after restart. |
+| 8 Evaluation | Not started: needs Phase 3 output on a real listing. |
+
+## To unblock
+Accept the Stability AI Non-Commercial License at https://huggingface.co/stabilityai/stable-virtual-camera with the account behind
+Modal's `huggingface` secret (currently a teammate's account), or put your own token in that secret. Then Retry the Pierce Velocity
+card on the dashboard (scene already uploaded). Check access: `uvx --from modal==1.5.5 python pipeline/gi.py check`.
+Note the license is non-commercial: fine for the MVP experiment; production use needs a commercial license or another model.
+
+## Known limits
+- Facing detection answers "unknown" when photos don't share enough features; unknowns follow the majority. A vision-model check is the robust fix.
+- Real photos are assumed to share one camera distance, height and FOV.
+- Deferred per plan §39: Garage backend branch (built earlier, local only), Clerk keys, Supabase bucket, packaging polish.
+
+## Earlier status (mesh era, kept for history)
 
 **Desktop app (macOS, Electron)**
 - Sidebar (3D Listings, Settings), listing browser searching live Garage listings by title or number, viewer with orbit/zoom/pan, Front/Rear/Left/Right/Reset presets, inspection panel with the listing's real photos (labelled by view: front, front 3/4, side, rear 3/4, rear, pump panel, compartment, engine bay, wheels, cab interior, dash, module interior) and specs.

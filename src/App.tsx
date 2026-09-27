@@ -146,7 +146,10 @@ export default function App() {
   const onCapturePose = useCallback((fn: () => Pose) => setCapturePose(() => fn), []);
   const selected = tags.find((t) => t.id === selectedTagId) ?? null;
   // Real photos taken from roughly the direction the camera is looking; the 360 orbits, the photo tells the truth.
-  const anglePhotos = listing ? listing.photos.filter((p) => p.viewLabel === viewBucket) : [];
+  // Lead with the photo this version was built from (a full exterior shot), not the first close-up in the gallery.
+  const anglePhotos = listing
+    ? listing.photos.filter((p) => p.viewLabel === viewBucket).sort((a, b) => Number(asset?.sourceImageIds.includes(b.id) ?? 0) - Number(asset?.sourceImageIds.includes(a.id) ?? 0))
+    : [];
   const anglePhoto = anglePhotos[photoIdx % Math.max(anglePhotos.length, 1)];
   const viewable = asset && asset.processingStatus === "ready" && (asset.reviewStatus === "approved" || editing || pickedVersion === asset.id);
   const titles = Object.fromEntries([...results.map((r) => [r.id, r.listingTitle]), ...generations.map((g) => [g.listingId, g.title]), ...recent.map((r) => [r.id, r.title])]);

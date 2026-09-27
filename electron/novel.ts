@@ -4,6 +4,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Generation, GenerationStage, ListingDetail, SplatPipeline } from "../src/data/types.ts";
 import { buildSplit, buildTransforms, EXTERIOR_LABELS, planRing, RING, validatePosed, viewerScale, type Facing, type RingView } from "../src/data/novel.ts";
+import { pruneSplatFile } from "./ply.ts";
+
+// MVP quality bar (not photogrammetry-grade): 7k Splatfacto iterations is ~half the GPU time of the 15k default and
+// yields smaller splats that render smoothly; raise it only if the orbit looks under-trained.
+const ITERATIONS = 7000;
 
 // Sparse listing photos -> 360 splat (docs/PLAN.md §24, §31, §32). Local steps run here; GPU steps are detached Modal calls
 // whose ids and progress are persisted, so a closed window never loses a job and polling resumes on the next launch.
@@ -191,7 +196,10 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
     }
     if (g.pipeline !== "posed-test" && !g.done.views) {
       if (!g.calls.views) {
-        update(d, g, { stage: "generating_views", current: 0, total: 24 - realCount(dir), message: "Starting view generator" });
+        update(d, g, { stage: "generating_views", current: undefined, total: undefined, message: "Checking view-generator access" });
+        const access = (await gi(d, "check")).seva as string; // cheap CPU call: never start an H100 just to hit a 403
+        if (!access.startsWith("ok")) throw new Error("Stable Virtual Camera weights are gated: accept the license at huggingface.co/stabilityai/stable-virtual-camera with the account behind Modal's `huggingface` secret, then Retry");
+        update(d, g, { current: 0, total: 24 - realCount(dir), message: "Starting view generator" });
         update(d, g, { calls: { ...g.calls, views: (await gi(d, "spawn-views", g.listingId, g.id)).callId } });
       }
       await pollCall(d, g, g.calls.views!, "generating_views");
@@ -214,15 +222,19 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
     if (!g.done.splat) {
       const job = `novel-${g.listingId.slice(0, 8)}-${g.id}`;
       if (!g.calls.splat) {
-        update(d, g, { stage: "reconstructing", current: 0, total: 15000, message: undefined });
-        update(d, g, { calls: { ...g.calls, splat: (await gi(d, "spawn-splat", job, posedDir.slice(1), g.id, "24", "A10G")).callId } });
+        update(d, g, { stage: "reconstructing", current: 0, total: ITERATIONS, message: undefined });
+        update(d, g, { calls: { ...g.calls, splat: (await gi(d, "spawn-splat", job, posedDir.slice(1), g.id, "24", "A10G", String(ITERATIONS))).callId } });
       }
       const result = await pollCall(d, g, g.calls.splat!, "reconstructing");
       update(d, g, { stage: "exporting", current: undefined, total: undefined, message: `Downloading splat (${Math.round((result?.ply_bytes ?? 0) / 1e6)} MB)` });
       fs.mkdirSync(path.join(dir, "output"), { recursive: true });
       const out = path.join(dir, "output", g.pipeline === "posed-test" ? "posed-test.ply" : "splat.ply");
       await volume(d, "get", `/jobs/${job}/export/splat.ply`, out);
-      const assetId = d.importSplat(g.listingId, out, g.pipeline, viewerScale());
+      // Every camera sits on the ring looking inward, so anything near or beyond the ring is a floater, not vehicle.
+      const pruned = out.replace(/\.ply$/, ".pruned.ply");
+      const r = pruneSplatFile(out, pruned, { minOpacity: 0.05, maxRadius: RING.radius * 0.6, minY: -0.15, maxY: RING.target[1] * 3.5 });
+      update(d, g, { message: `Kept ${r.kept.toLocaleString()} of ${r.total.toLocaleString()} splats` });
+      const assetId = d.importSplat(g.listingId, pruned, g.pipeline, viewerScale());
       update(d, g, { done: { ...g.done, splat: true }, assetId });
     }
     update(d, g, { stage: "ready", current: undefined, total: undefined, message: "Ready for review" });

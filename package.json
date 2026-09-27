@@ -10,7 +10,7 @@
     "dev:web": "vite --mode web",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test --experimental-strip-types src/data/*.test.ts",
+    "test": "node --test --experimental-strip-types src/data/*.test.ts electron/*.test.ts",
     "preview": "vite preview --mode web",
     "dist": "npm run build && CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --mac --publish never"
   },
