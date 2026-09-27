@@ -11,8 +11,12 @@ candidates.json: [{"id", "url", "viewLabel"}]. Writes <out_dir>/frames/NNN.jpg a
 """
 import io
 import json
+import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 
 import cv2
 import numpy as np
@@ -33,8 +37,11 @@ sift = cv2.SIFT_create(5000)
 matcher = cv2.BFMatcher()
 
 
+LABEL_SLACK = 30  # listing labels are loose (front-3/4 shots labelled "front", rear-3/4 labelled "side")
+
+
 def in_window(az: float, label: str) -> bool:
-    return any(lo <= az <= hi or lo <= az - 360 <= hi for lo, hi in WINDOWS.get(label, []))
+    return any(lo - LABEL_SLACK <= a <= hi + LABEL_SLACK for lo, hi in WINDOWS.get(label, []) for a in (az, az - 360))
 
 
 _session = None
@@ -104,6 +111,48 @@ def real_view(M, pshape, gw: int, gh: int):
     return z, float(gx), float(gy), (cx - ww / 2, cy - wh / 2, cx + ww / 2, cy + wh / 2)
 
 
+INTERP = 4  # in-between frames per gap (x4: 7.5 deg lap -> 1.875 deg steps)
+RIFE_DIR = pathlib.Path(os.environ.get("GI_RIFE_DIR", pathlib.Path.home() / ".cache/gi/rife-ncnn-vulkan-20221029-macos"))
+
+
+def interpolate(out_dir: pathlib.Path, frames: list[dict], factor: int) -> list[dict]:
+    """Optical-flow in-betweens (RIFE v4.6, local GPU) so a slow spin never shows two frames blended. Key frames
+    are copied through untouched (real photos stay the photo); in-betweens are marked "interpolated". Without the
+    RIFE binary the lap is returned as is."""
+    exe = RIFE_DIR / "rife-ncnn-vulkan"
+    if factor <= 1 or not exe.exists():
+        print(f"no interpolation (RIFE not found at {RIFE_DIR})" if factor > 1 else "no interpolation", file=sys.stderr)
+        return [{**f, "key": True} for f in frames]
+    n = len(frames)
+    with tempfile.TemporaryDirectory() as tmp:
+        tin, tout = pathlib.Path(tmp, "in"), pathlib.Path(tmp, "out")
+        tin.mkdir(), tout.mkdir()
+        for i, f in enumerate(frames + frames[:1]):  # closed loop: last frame -> first
+            shutil.copy(out_dir / f["file"], tin / f"{i:04d}.jpg")
+        subprocess.run([str(exe), "-i", str(tin), "-o", str(tout), "-m", str(RIFE_DIR / "rife-v4.6"), "-n", str(n * factor + 1),
+                        "-f", "%04d.jpg"], check=True, capture_output=True)  # outputs are 1-indexed
+        keys = out_dir / "keys"
+        shutil.rmtree(keys, ignore_errors=True)
+        (out_dir / "frames").rename(keys)
+        (out_dir / "frames").mkdir()
+        out = []
+        for j in range(n * factor):
+            k, r = divmod(j, factor)
+            a, b, t = frames[k], frames[(k + 1) % n], r / factor
+            name = f"frames/{j:03d}.jpg"
+            if r == 0:
+                shutil.copy(keys / pathlib.Path(a["file"]).name, out_dir / name)
+                out.append({**a, "file": name, "key": True})
+                continue
+            shutil.copy(tout / f"{j + 1:04d}.jpg", out_dir / name)
+            db = (b["azimuth"] - a["azimuth"]) % 360
+            view = [a["view"][i] + (b["view"][i] - a["view"][i]) * t for i in range(3)]
+            out.append({"azimuth": round((a["azimuth"] + db * t) % 360, 4), "file": name, "source": "interpolated",
+                        "sourceImageId": None, "view": [round(v, 4) for v in view]})
+        shutil.rmtree(keys)
+    return out
+
+
 def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.Path) -> None:
     gen_dir = exp_dir / "generated"
     frames = sorted(gen_dir.glob("*.png"), key=lambda p: int(p.stem))
@@ -119,6 +168,7 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
     gen_feat = [features(g, truck_mask(g, masks / f"gen-{p.stem}-{p.stat().st_mtime_ns}.png")) for g, p in zip(gen, frames)]
     candidates = json.loads(candidates_path.read_text())
     matches = []  # (inliers, slot, photo_id, M, scale)
+    mirrored = []  # (inliers, azimuth, photo_id)
     for c in candidates:
         if c.get("viewLabel") not in WINDOWS:
             continue
@@ -127,7 +177,12 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
         except Exception as e:  # unreachable photo: skip, never fail the build
             print("skip", c["id"], e, file=sys.stderr)
             continue
-        pf = features(photo, truck_mask(photo, masks / f"{c['id']}.png"))
+        pmask = truck_mask(photo, masks / f"{c['id']}.png")
+        pf = features(photo, pmask)
+        # Mirrored registration: a photo of a side the lap only hallucinated won't match it directly, but its mirror
+        # matches the photographed opposite side at azimuth a, putting the photo at 360 - a. Used only to pin
+        # generator inputs, never to place a (mirrored) image in the spin.
+        pf_m = features(np.ascontiguousarray(photo[:, ::-1]), np.ascontiguousarray(pmask[:, ::-1]))
         # Expected scale for a full-vehicle shot: photo and frame both show the whole truck at similar framing.
         expect = gw / photo.shape[1]
         for slot, az in enumerate(azimuths):
@@ -136,6 +191,25 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
             M, inl, s = align(pf, gen_feat[slot], gw)
             if M is not None and 0.55 * expect <= s <= 1.6 * expect:
                 matches.append((inl, slot, c["id"], M, s, photo.shape))
+        for slot, az in enumerate(azimuths):
+            if not in_window((360 - az) % 360, c["viewLabel"]):
+                continue
+            M, inl, s = align(pf_m, gen_feat[slot], gw)
+            if M is not None and 0.55 * expect <= s <= 1.6 * expect:
+                mirrored.append((inl, (360 - az) % 360, c["id"]))
+
+    # Best slot per photo (also for photos that don't end up in the spin): feeds more pinned inputs to the generator.
+    best = {}
+    for inl, slot, pid, M, s, shape in matches:
+        if pid not in best or inl > best[pid]["inliers"]:
+            best[pid] = {"photo": pid, "azimuth": azimuths[slot], "inliers": inl, "zoom": round(max(1.0, (gw / s) / shape[1], (gen[0].shape[0] / s) / shape[0]), 3)}
+    for inl, az, pid in mirrored:
+        if pid not in best or (best[pid].get("mirrored") and inl > best[pid]["inliers"]):
+            if pid in best and not best[pid].get("mirrored"):
+                continue
+            best[pid] = {"photo": pid, "azimuth": az, "inliers": inl, "mirrored": True}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "registrations.json").write_text(json.dumps(sorted(best.values(), key=lambda r: r["azimuth"]), indent=2))
 
     # Greedy: strongest matches first; each photo and each slot used at most once.
     used_photo, used_slot, placed = set(), {}, []
@@ -171,7 +245,8 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
         return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
 
     frames_dir = out_dir / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(frames_dir, ignore_errors=True)  # a previous (interpolated) build leaves more files
+    frames_dir.mkdir(parents=True)
     out_frames = []
     for slot, az in enumerate(azimuths):
         pid = None
@@ -192,6 +267,7 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
         out_frames.append({"azimuth": az, "file": f"frames/{name}", "source": "real" if pid else "generated", "sourceImageId": pid,
                            "view": [round(view[0], 4), round(view[1], 2), round(view[2], 2)]})  # zoom, centre in ring px
 
+    out_frames = interpolate(out_dir, out_frames, INTERP)
     spin = {"w": OUT_W, "h": OUT_H, "ring": manifest["ring"], "frames": out_frames}
     (out_dir / "spin.json").write_text(json.dumps(spin, indent=2))
     print(json.dumps({"frames": len(out_frames), "real": len(placed), "placed": placed}))

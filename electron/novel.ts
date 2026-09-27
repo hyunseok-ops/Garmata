@@ -154,7 +154,7 @@ export async function prep(d: Deps, listingId: string) {
   const ring = ringFor(overrides);
   let views: RingView[] = planRing(usable, facing, overrides, ring);
   for (const v of views) if (v.source === "real") {
-    fs.writeFileSync(path.join(dir, "scene", v.file), crops.get(v.sourceImageId!)!.resize({ width: RING.w, height: RING.h, quality: "best" }).toPNG());
+    fs.writeFileSync(path.join(dir, "scene", v.file), crops.get(v.sourceImageId!)!.resize({ width: ring.w, height: ring.h, quality: "best" }).toPNG());
   }
   const realFiles = views.filter((v) => v.source === "real").map((v) => v.sourceImage!);
   views = views.map((v) => (v.source === "generated" ? { ...v, conditionedOn: realFiles } : v));
@@ -202,9 +202,13 @@ async function pollCall(d: Deps, g: Generation, callId: string, fallback: Genera
 }
 
 export function newGeneration(d: Deps, listingId: string, title: string, pipeline: SplatPipeline, secondaryId?: number): Generation {
-  const active = Object.values(d.loadGenerations()).find((x) => x.listingId === listingId && x.pipeline === pipeline && !TERMINAL.includes(x.stage));
+  const open = Object.values(d.loadGenerations()).filter((x) => x.listingId === listingId && x.pipeline === pipeline && !TERMINAL.includes(x.stage));
+  const active = open.find((x) => !x.paused);
   if (active) return active; // plan §7: retries never duplicate a live job
   const now = new Date().toISOString();
+  // A paused job (views generated, stopped for inspection) is not live; a new run replaces it rather than reusing it,
+  // or its done flags would skip the new generation entirely.
+  for (const x of open) d.saveGeneration({ ...x, stage: "failed", paused: false, error: "Superseded by a newer run", updatedAt: now });
   const g: Generation = { id: `gen-${Date.now().toString(36)}`, listingId, title, secondaryId, pipeline, stage: "queued", calls: {}, done: {}, startedAt: now, updatedAt: now };
   d.saveGeneration(g);
   return g;

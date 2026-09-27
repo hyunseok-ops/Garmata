@@ -4,15 +4,19 @@ import { focalPx, poseFor, RING } from "../data/novel.ts";
 import type { ViewBucket } from "./Viewer.tsx";
 
 // Photo spin: a turntable of frames. At photographed angles the frame is the real listing photo (aligned, not
-// altered); in between, generated frames fill the gap. Frames are preloaded and cross-faded, and drag has momentum,
-// so the lap feels continuous. Tags are projected into each frame from the exact ring camera used to make it.
+// altered); in between, generated frames fill the gap, and optical-flow in-betweens make the steps small.
+// Key frames stay decoded; in-betweens are decoded (off-thread, as ImageBitmaps) only in a window around the current
+// angle, so ~200 full-size frames never sit in memory at once. If the spin outruns the window, the two surrounding
+// key frames are cross-faded instead. Tags are projected from the ring camera each frame was made with.
 
-type SpinFrame = { azimuth: number; file: string; source: "real" | "generated"; sourceImageId: string | null; view?: [number, number, number] };
+type SpinFrame = { azimuth: number; file: string; source: "real" | "generated" | "interpolated"; sourceImageId: string | null; view?: [number, number, number]; key?: boolean };
 type SpinData = { w: number; h: number; ring: typeof RING; frames: SpinFrame[] };
 
 const DEG_PER_PX = 0.35;
 const FRICTION = 0.92;
 const WHEEL_DEG_PER_PX = 0.25;
+const WINDOW = 16; // in-between frames kept decoded on each side of the current one
+const isKey = (f: SpinFrame) => f.key ?? f.source !== "interpolated";
 
 function bucketFor(az: number): ViewBucket {
   const a = Math.abs((((az + 180) % 360) + 360) % 360 - 180); // 0 front .. 180 rear, either side
@@ -32,30 +36,50 @@ export default function SpinViewer(props: {
   const [loaded, setLoaded] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [angle, setAngle] = useState(45);
-  const images = useRef<HTMLImageElement[]>([]);
+  const bitmaps = useRef(new Map<number, ImageBitmap>());
+  const pending = useRef(new Set<number>());
+  const current = useRef(0);
   const canvas = useRef<HTMLCanvasElement>(null);
   const wrap = useRef<HTMLDivElement>(null);
   const motion = useRef({ dragging: false, lastX: 0, v: 0, target: null as number | null, raf: 0 });
   const [size, setSize] = useState({ w: 800, h: 600 });
 
+  const wanted = (d: SpinData, i: number) => {
+    const n = d.frames.length;
+    return isKey(d.frames[i]) || Math.min((i - current.current + n) % n, (current.current - i + n) % n) <= WINDOW;
+  };
+  const request = (d: SpinData, i: number) => {
+    if (bitmaps.current.has(i) || pending.current.has(i)) return;
+    pending.current.add(i);
+    fetch(base + d.frames[i].file)
+      .then((r) => r.blob())
+      .then((b) => createImageBitmap(b))
+      .then((bm) => {
+        pending.current.delete(i);
+        if (!wanted(d, i) || bitmaps.current.has(i)) return bm.close();
+        bitmaps.current.set(i, bm);
+        setLoaded((x) => x + 1);
+      })
+      .catch(() => pending.current.delete(i));
+  };
+
   useEffect(() => {
     let cancelled = false;
+    const held = bitmaps.current;
     fetch(props.asset.storageKey!)
       .then((r) => r.json())
-      .then(async (d: SpinData) => {
+      .then((d: SpinData) => {
         if (cancelled) return;
         setData(d);
-        images.current = d.frames.map(() => new Image());
-        await Promise.all(d.frames.map(async (f, i) => {
-          const im = images.current[i];
-          im.src = base + f.file;
-          await im.decode().catch(() => undefined); // decode off the main thread before first draw
-          if (!cancelled) setLoaded((n) => n + 1);
-        }));
+        d.frames.forEach((f, i) => isKey(f) && request(d, i));
       })
       .catch((e) => setError(String(e)));
-    return () => { cancelled = true; };
-  }, [props.asset.storageKey, base]);
+    return () => {
+      cancelled = true;
+      held.forEach((b) => b.close());
+      held.clear();
+    };
+  }, [props.asset.storageKey, base]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const el = wrap.current;
@@ -98,6 +122,16 @@ export default function SpinViewer(props: {
   const i1 = (i0 + 1) % n;
   const t = a / step - Math.floor(a / step);
   const nearest = t < 0.5 ? i0 : i1;
+  const keyCount = data ? data.frames.filter(isKey).length : 1;
+  const keysLoaded = data ? data.frames.reduce((c, f, i) => c + (isKey(f) && bitmaps.current.has(i) ? 1 : 0), 0) : 0;
+
+  // Keep the window around the current frame decoded (nearest first) and release what fell out of it.
+  useEffect(() => {
+    if (!data) return;
+    current.current = nearest;
+    for (let k = 0; k <= WINDOW; k++) for (const i of [(nearest + k) % n, (nearest - k + n) % n]) request(data, i);
+    for (const [i, b] of bitmaps.current) if (!wanted(data, i)) { b.close(); bitmaps.current.delete(i); }
+  }, [data, nearest]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => props.onViewChange?.(bucketFor(a)), [bucketFor(a)]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -137,17 +171,27 @@ export default function SpinViewer(props: {
     if (!c || !data) return;
     const ctx = c.getContext("2d")!;
     ctx.clearRect(0, 0, size.w, size.h);
-    const a0 = images.current[i0], a1 = images.current[i1];
-    if (a0?.complete) {
-      ctx.globalAlpha = 1;
-      ctx.drawImage(a0, dx, dy, dw, dh);
+    let f0 = bitmaps.current.get(i0), f1 = bitmaps.current.get(i1), mix = t;
+    const stats = wrap.current!.dataset; // read by the smoke test: how often the key-frame fallback was needed
+    stats.draws = String(Number(stats.draws ?? 0) + 1);
+    stats.decoded = String(bitmaps.current.size);
+    if (!f0 || !f1) { // spinning faster than in-betweens decode: blend the surrounding key frames
+      stats.fallbacks = String(Number(stats.fallbacks ?? 0) + 1);
+      const every = n / keyCount, pos = a / step, k0 = Math.floor(pos / every) * every;
+      f0 = bitmaps.current.get(k0 % n);
+      f1 = bitmaps.current.get((k0 + every) % n);
+      mix = (pos - k0) / every;
     }
-    if (a1?.complete && t > 0.02) {
-      ctx.globalAlpha = t;
-      ctx.drawImage(a1, dx, dy, dw, dh);
+    if (f0) {
+      ctx.globalAlpha = 1;
+      ctx.drawImage(f0, dx, dy, dw, dh);
+    }
+    if (f1 && mix > 0.02) {
+      ctx.globalAlpha = mix;
+      ctx.drawImage(f1, dx, dy, dw, dh);
     }
     ctx.globalAlpha = 1;
-  }, [data, i0, i1, t, size, loaded, dx, dy, dw, dh]);
+  }, [data, i0, i1, t, size, loaded, dx, dy, dw, dh, n, keyCount, a, step]);
 
   // Tag projection through the nearest frame's ring camera (viewer units -> ring world via the asset scale).
   const k = props.asset.transform?.scale ?? 1;
@@ -214,7 +258,7 @@ export default function SpinViewer(props: {
       ))}
       {frame && <div className={`spin-badge ${frame.source}`}>{frame.source === "real" ? "Real listing photo" : "AI-generated angle"} · {Math.round(a)}°</div>}
       {error && <div className="viewport-state center">Spin failed to load: {error}</div>}
-      {data && loaded < n && <div className="spin-loading">Loading frames {loaded}/{n}</div>}
+      {data && keysLoaded < keyCount && <div className="spin-loading">Loading frames {keysLoaded}/{keyCount}</div>}
     </div>
   );
 }

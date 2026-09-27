@@ -78,7 +78,7 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
     await wait(500);
     await js(`[...document.querySelectorAll('.tabs button')].find(b => b.textContent.startsWith('360'))?.click()`);
     const t0 = Date.now();
-    await js(`new Promise((resolve) => { const check = () => document.querySelector('.spin canvas') && !document.querySelector('.spin-loading') ? resolve(true) : setTimeout(check, 100); check(); })`);
+    await js(`new Promise((resolve) => { const check = () => document.querySelector('.spin-badge') && !document.querySelector('.spin-loading') ? resolve(true) : setTimeout(check, 100); check(); })`);
     console.log(`SPIN LOADED ${Date.now() - t0}ms`);
     await wait(500);
     await shot("spin-0");
@@ -99,6 +99,7 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
     })`);
     console.log("SPIN FPS " + JSON.stringify(fps) + " errors " + JSON.stringify(errors));
     // Trackpad scroll: a wheel event every frame for 6 s (a full lap and a half), sampling frame times.
+    await js(`Object.assign(document.querySelector('.spin').dataset, { draws: 0, fallbacks: 0 })`);
     const wheel = await js(`new Promise((resolve) => {
       const el = document.querySelector('.spin'); const dts = []; let last = performance.now(); const end = last + 6000;
       const tick = (t) => { el.dispatchEvent(new WheelEvent('wheel', { deltaX: 12, bubbles: true, cancelable: true })); dts.push(t - last); last = t;
@@ -106,7 +107,7 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
           resolve({ frames: dts.length, fps: +(dts.length / 6).toFixed(1), p50ms: q(0.5), p95ms: q(0.95), maxms: q(1), angle: document.querySelector('.spin-badge')?.textContent }); } };
       requestAnimationFrame(tick);
     })`);
-    console.log("SPIN WHEEL " + JSON.stringify(wheel));
+    console.log("SPIN WHEEL " + JSON.stringify(wheel) + " " + JSON.stringify(await js(`({ ...document.querySelector('.spin').dataset })`)));
     return;
   }
   await js(`[...document.querySelectorAll('header button')].find(b => b.textContent === 'Edit tags')?.click()`);

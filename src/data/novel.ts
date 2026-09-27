@@ -85,15 +85,16 @@ export type RingView = {
 // keepBackground: view normalization scales the whole photo (not a cutout on white) and matting is skipped, so every
 // generated frame carries a background: real surroundings at the photographed angles, SEVA's continuation between them.
 // Meant for the photo spin view; a 3D splat can't reconcile invented backgrounds.
-export type RingOverrides = { labels?: Record<string, number>; photos?: Record<string, number>; regenerateReals?: boolean; ringStepDeg?: number; keepBackground?: boolean };
+export type RingOverrides = { labels?: Record<string, number>; photos?: Record<string, number>; regenerateReals?: boolean; ringStepDeg?: number; keepBackground?: boolean; ringSize?: [number, number] };
 export function normalizeOverrides(o: unknown): RingOverrides {
   const x = (o ?? {}) as Record<string, unknown>;
-  return ["labels", "photos", "regenerateReals", "ringStepDeg", "keepBackground"].some((k) => k in x) ? (x as RingOverrides) : { labels: x as Record<string, number> };
+  return ["labels", "photos", "regenerateReals", "ringStepDeg", "keepBackground", "ringSize"].some((k) => k in x) ? (x as RingOverrides) : { labels: x as Record<string, number> };
 }
 
-// Ring for a listing: the default 24-view ring unless the experiment config asks for a different spacing.
+// Ring for a listing: the default 24-view ring unless the experiment config asks for a different spacing or size
+// (SEVA needs multiples of 64).
 export function ringFor(o: RingOverrides) {
-  return o.ringStepDeg ? { ...RING, stepDeg: o.ringStepDeg } : RING;
+  return { ...RING, ...(o.ringStepDeg ? { stepDeg: o.ringStepDeg } : {}), ...(o.ringSize ? { w: o.ringSize[0], h: o.ringSize[1] } : {}) };
 }
 
 const slot = (az: number, ring = RING) => ((Math.round(az / ring.stepDeg) * ring.stepDeg) % 360 + 360) % 360;
