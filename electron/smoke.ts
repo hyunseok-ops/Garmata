@@ -98,6 +98,15 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
       requestAnimationFrame(tick);
     })`);
     console.log("SPIN FPS " + JSON.stringify(fps) + " errors " + JSON.stringify(errors));
+    // Trackpad scroll: a wheel event every frame for 6 s (a full lap and a half), sampling frame times.
+    const wheel = await js(`new Promise((resolve) => {
+      const el = document.querySelector('.spin'); const dts = []; let last = performance.now(); const end = last + 6000;
+      const tick = (t) => { el.dispatchEvent(new WheelEvent('wheel', { deltaX: 12, bubbles: true, cancelable: true })); dts.push(t - last); last = t;
+        if (t < end) requestAnimationFrame(tick); else { dts.sort((a, b) => a - b); const q = (p) => +dts[Math.floor(p * (dts.length - 1))].toFixed(1);
+          resolve({ frames: dts.length, fps: +(dts.length / 6).toFixed(1), p50ms: q(0.5), p95ms: q(0.95), maxms: q(1), angle: document.querySelector('.spin-badge')?.textContent }); } };
+      requestAnimationFrame(tick);
+    })`);
+    console.log("SPIN WHEEL " + JSON.stringify(wheel));
     return;
   }
   await js(`[...document.querySelectorAll('header button')].find(b => b.textContent === 'Edit tags')?.click()`);

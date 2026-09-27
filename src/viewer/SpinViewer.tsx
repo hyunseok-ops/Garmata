@@ -12,6 +12,7 @@ type SpinData = { w: number; h: number; ring: typeof RING; frames: SpinFrame[] }
 
 const DEG_PER_PX = 0.35;
 const FRICTION = 0.92;
+const WHEEL_DEG_PER_PX = 0.25;
 
 function bucketFor(az: number): ViewBucket {
   const a = Math.abs((((az + 180) % 360) + 360) % 360 - 180); // 0 front .. 180 rear, either side
@@ -104,14 +105,37 @@ export default function SpinViewer(props: {
   const fit = data ? Math.min(size.w / data.w, size.h / data.h) : 1;
   const dw = data ? data.w * fit : 0, dh = data ? data.h * fit : 0;
   const dx = (size.w - dw) / 2, dy = (size.h - dh) / 2;
+  // Resizing a canvas reallocates its buffer, so only do it when the viewport size changes, never per frame.
   useEffect(() => {
     const c = canvas.current;
-    if (!c || !data) return;
+    if (!c) return;
     const dpr = window.devicePixelRatio || 1;
     c.width = Math.round(size.w * dpr);
     c.height = Math.round(size.h * dpr);
+    c.getContext("2d")!.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }, [size]);
+
+  // Trackpad / wheel spins the truck. Native listener so the page can't scroll or swipe-navigate underneath;
+  // macOS already sends momentum as wheel events, so no extra inertia here.
+  useEffect(() => {
+    const el = wrap.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const m = motion.current;
+      m.target = null;
+      m.v = 0;
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      setAngle((x) => x + d * WHEEL_DEG_PER_PX);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  useEffect(() => {
+    const c = canvas.current;
+    if (!c || !data) return;
     const ctx = c.getContext("2d")!;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, size.w, size.h);
     const a0 = images.current[i0], a1 = images.current[i1];
     if (a0?.complete) {
