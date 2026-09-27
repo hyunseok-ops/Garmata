@@ -329,6 +329,17 @@ app.whenReady().then(() => {
   if (process.env.GI_NOVEL_GENERATE) return headless(driveCli(process.env.GI_NOVEL_GENERATE.split(","), "novel-view-splat", true));
   if (process.env.GI_NOVEL_SPLAT || process.env.GI_GENERATE) return headless(driveCli((process.env.GI_NOVEL_SPLAT ?? process.env.GI_GENERATE)!.split(","), "novel-view-splat"));
   if (process.env.GI_NOVEL_RENDER_TEST) return headless(driveCli(process.env.GI_NOVEL_RENDER_TEST.split(","), "posed-test"));
+  if (process.env.GI_NOVEL_RESPLAT) {
+    // Re-train only: reuse the views already on the volume (novel/<id>/posed) with the current reconstruction settings.
+    return headless((async () => {
+      for (const id of process.env.GI_NOVEL_RESPLAT!.split(",")) {
+        const l = await getListing(id);
+        const g = newGeneration(deps, id, l.listingTitle, "novel-view-splat", l.secondaryId);
+        deps.saveGeneration({ ...g, done: { ...g.done, prep: true, views: true }, message: "Re-training from existing views" });
+      }
+      await driveCli(process.env.GI_NOVEL_RESPLAT!.split(","), "novel-view-splat");
+    })());
+  }
   if (process.env.GI_SYNC) {
     // GI_SYNC=<assetId,...|all> pushes local assets, files, review state and tags to Garage.
     const s = loadStore();

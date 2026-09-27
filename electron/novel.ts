@@ -6,9 +6,9 @@ import type { Generation, GenerationStage, ListingDetail, SplatPipeline } from "
 import { buildSplit, buildTransforms, EXTERIOR_LABELS, normalizeOverrides, planRing, RING, ringFor, validatePosed, viewerScale, type Facing, type RingView } from "../src/data/novel.ts";
 import { pruneSplatFile } from "./ply.ts";
 
-// MVP quality bar (not photogrammetry-grade): 7k Splatfacto iterations is ~half the GPU time of the 15k default and
-// yields smaller splats that render smoothly; raise it only if the orbit looks under-trained.
-const ITERATIONS = 7000;
+// Splatfacto default budget. 7k was tried first and looked under-trained; with scale regularization on, 15k is the
+// setting that keeps splats compact enough to survive small camera tilts.
+const ITERATIONS = 15000;
 
 // Sparse listing photos -> 360 splat (docs/PLAN.md §24, §31, §32). Local steps run here; GPU steps are detached Modal calls
 // whose ids and progress are persisted, so a closed window never loses a job and polling resumes on the next launch.
@@ -237,7 +237,7 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
       const job = `novel-${g.listingId.slice(0, 8)}-${g.id}`;
       if (!g.calls.splat) {
         update(d, g, { stage: "reconstructing", current: 0, total: ITERATIONS, message: undefined });
-        update(d, g, { calls: { ...g.calls, splat: (await gi(d, "spawn-splat", job, posedDir.slice(1), g.id, String(g.pipeline === "posed-test" ? 24 : ringCount(dir)), "A10G", String(ITERATIONS))).callId } });
+        update(d, g, { calls: { ...g.calls, splat: (await gi(d, "spawn-splat", job, posedDir.slice(1), g.id, String(g.pipeline === "posed-test" ? 24 : ringCount(dir)), "A10G", String(ITERATIONS), "1")).callId } });
       }
       const result = await pollCall(d, g, g.calls.splat!, "reconstructing");
       update(d, g, { stage: "exporting", current: undefined, total: undefined, message: `Downloading splat (${Math.round((result?.ply_bytes ?? 0) / 1e6)} MB)` });

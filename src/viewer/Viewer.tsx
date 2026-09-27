@@ -5,16 +5,42 @@ import * as THREE from "three";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
 import type { Listing3DAsset, Listing3DTag, Vec3 } from "../data/types.ts";
+import { RING, viewerScale } from "../data/novel.ts";
 import IllustrativeTruck from "./IllustrativeTruck.tsx";
 
 export type Pose = { position: Vec3; target: Vec3 };
-export const PRESETS: Record<"Reset" | "Front" | "Rear" | "Left" | "Right", Pose> = {
+type PresetName = "Reset" | "Front" | "Rear" | "Left" | "Right";
+export const PRESETS: Record<PresetName, Pose> = {
   Reset: { position: [9, 5, 9], target: [0, 1.4, 0] },
   Front: { position: [13, 2.5, 0], target: [0, 1.4, 0] },
   Rear: { position: [-13, 2.5, 0], target: [0, 1.4, 0] },
   Left: { position: [0, 2.5, 13], target: [0, 1.4, 0] },
   Right: { position: [0, 2.5, -13], target: [0, 1.4, 0] },
 };
+
+// Ring-trained splats (novel-view / pipeline test) are only valid near the ring the cameras sat on: same height, same
+// distance. Above or below it the splats' needle shapes show as shards, so these assets orbit freely left/right but
+// tilt only a little, and the presets sit on the ring. Ring geometry comes from src/data/novel.ts scaled into the viewer.
+export type CameraLimits = { minPolar: number; maxPolar: number; minDistance: number; maxDistance: number };
+const RING_TILT = (12 * Math.PI) / 180;
+
+export function isRingSplat(asset: Pick<Listing3DAsset, "format" | "pipelineVersion">) {
+  return asset.format === "splat" && (asset.pipelineVersion === "novel-view-splat" || asset.pipelineVersion === "posed-test");
+}
+
+export function viewFor(asset: Pick<Listing3DAsset, "format" | "pipelineVersion" | "transform"> | null): { presets: Record<PresetName, Pose>; limits: CameraLimits } {
+  if (!asset || !isRingSplat(asset)) return { presets: PRESETS, limits: { minPolar: 0, maxPolar: Math.PI / 2 - 0.02, minDistance: 3, maxDistance: 40 } };
+  const k = asset.transform?.scale ?? viewerScale();
+  const r = RING.radius * k, y = RING.height * k, target: Vec3 = [0, RING.target[1] * k, 0];
+  // Presets sit 1.4x farther than the training ring along the same rays: the viewer pane is narrower than the 4:3
+  // training frames, and backing off along a trained ray stays valid where tilting does not.
+  const d = r * 1.4;
+  const at = (deg: number): Pose => ({ position: [d * Math.cos((deg * Math.PI) / 180), y, d * Math.sin((deg * Math.PI) / 180)], target });
+  return {
+    presets: { Reset: at(45), Front: at(0), Rear: at(180), Left: at(90), Right: at(270) },
+    limits: { minPolar: Math.PI / 2 - RING_TILT, maxPolar: Math.PI / 2 + RING_TILT / 2, minDistance: r * 0.6, maxDistance: r * 2.2 },
+  };
+}
 
 const MAX_ASSET_BYTES = 100 * 1024 * 1024;
 
@@ -186,10 +212,11 @@ export default function Viewer(props: {
 
   const renderable = props.asset.format === "procedural" || props.asset.storageKey;
   const isSplat = props.asset.format === "splat";
+  const view = viewFor(props.asset);
 
   return (
     // Splats: no shadow maps, and a 1.5x pixel-ratio cap (splat cost scales with pixels x splats).
-    <Canvas shadows={!isSplat} dpr={isSplat ? [1, 1.5] : [1, 2]} gl={{ toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05, powerPreference: "high-performance" }} camera={{ position: PRESETS.Reset.position, fov: 45 }} onPointerMissed={() => props.onSelectTag(null)} style={{ cursor: props.placing ? "crosshair" : "grab" }}>
+    <Canvas shadows={!isSplat} dpr={isSplat ? [1, 1.5] : [1, 2]} gl={{ toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05, powerPreference: "high-performance" }} camera={{ position: view.presets.Reset.position, fov: 45 }} onPointerMissed={() => props.onSelectTag(null)} style={{ cursor: props.placing ? "crosshair" : "grab" }}>
       <color attach="background" args={["#15161a"]} />
       <Suspense fallback={<hemisphereLight intensity={1} groundColor="#222" />}>
         <Environment preset="city" environmentIntensity={0.9} />
@@ -217,7 +244,8 @@ export default function Viewer(props: {
         <TagMarker key={t.id} tag={t} model={model} selected={t.id === props.selectedTagId} onSelect={() => props.onSelectTag(t.id)} />
       ))}
 
-      <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.1} minDistance={3} maxDistance={40} maxPolarAngle={Math.PI / 2 - 0.02} target={PRESETS.Reset.target} />
+      <OrbitControls ref={controls} makeDefault enableDamping dampingFactor={0.1} minDistance={view.limits.minDistance} maxDistance={view.limits.maxDistance}
+        minPolarAngle={view.limits.minPolar} maxPolarAngle={view.limits.maxPolar} target={view.presets.Reset.target} />
       <CameraRig pose={props.pose} controls={controls} />
       {props.onViewChange && <ViewReporter onChange={props.onViewChange} />}
     </Canvas>

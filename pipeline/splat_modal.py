@@ -124,7 +124,7 @@ MIN_FRAMES = 15  # below this a splat is not worth GPU time; report alignment an
 
 
 def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations: int, gpu: str, matcher: str = "sift",
-                 posed: str = "", progress_key: str = "", expected_frames: int | None = None) -> dict:
+                 posed: str = "", progress_key: str = "", expected_frames: int | None = None, scale_reg: bool = False) -> dict:
     import requests
 
     global LOG_DIR, PROGRESS_KEY
@@ -230,8 +230,12 @@ def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations
                 last[0] = time.time()
                 report("reconstructing", int(m.group(1)), iterations)
 
+        # Scale regularization caps each Gaussian's long/short axis ratio (max_gauss_ratio, default 10). Without it, sparse
+        # ring views are fitted with long flat "needles" that look right from the ring and shatter into shards off it.
+        model = ["--pipeline.model.use-scale-regularization", "True"] if scale_reg else []
+        stats["scale_reg"] = scale_reg
         sh(["ns-train", "splatfacto", "--data", str(processed), "--output-dir", str(outputs), "--experiment-name", job,
-            "--vis", "tensorboard", "--viewer.quit-on-train-completion", "True", "--max-num-iterations", str(iterations), *dataparser],
+            "--vis", "tensorboard", "--viewer.quit-on-train-completion", "True", "--max-num-iterations", str(iterations), *model, *dataparser],
            on_line=on_train_line)
         vol.commit()  # keep the checkpoint even if export fails; uncommitted volume writes die with the container
     print("trained runs:", [str(c.parent.name) for c in trained()], flush=True)
@@ -259,14 +263,14 @@ def _guarded(fn, progress_key: str, *args):
 
 @app.function(gpu="A10G", timeout=3 * 3600, volumes={str(DATA): vol})
 def reconstruct(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift",
-                posed: str = "", progress_key: str = "", expected_frames: int | None = None) -> dict:
-    return _guarded(_reconstruct, progress_key, job, image_urls, video, iterations, "A10G", matcher, posed, progress_key, expected_frames)
+                posed: str = "", progress_key: str = "", expected_frames: int | None = None, scale_reg: bool = False) -> dict:
+    return _guarded(_reconstruct, progress_key, job, image_urls, video, iterations, "A10G", matcher, posed, progress_key, expected_frames, scale_reg)
 
 
 @app.function(gpu="H100", timeout=3 * 3600, volumes={str(DATA): vol})
 def reconstruct_fast(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift",
-                     posed: str = "", progress_key: str = "", expected_frames: int | None = None) -> dict:
-    return _guarded(_reconstruct, progress_key, job, image_urls, video, iterations, "H100", matcher, posed, progress_key, expected_frames)
+                     posed: str = "", progress_key: str = "", expected_frames: int | None = None, scale_reg: bool = False) -> dict:
+    return _guarded(_reconstruct, progress_key, job, image_urls, video, iterations, "H100", matcher, posed, progress_key, expected_frames, scale_reg)
 
 
 @app.function(gpu="A10G", timeout=600)

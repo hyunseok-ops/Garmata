@@ -6,7 +6,7 @@ import { desktop } from "./data/garageApi.ts";
 import { CATEGORY_VIEWS, VIEW_LABELS } from "./data/photos.ts";
 import { AZIMUTH_BY_LABEL, EXTERIOR_LABELS } from "./data/novel.ts";
 import { addTag, deleteTag, updateTag } from "./data/tags.ts";
-import Viewer, { PRESETS, validateAssetUrl, type Pose, type ViewBucket } from "./viewer/Viewer.tsx";
+import Viewer, { validateAssetUrl, viewFor, type Pose, type ViewBucket } from "./viewer/Viewer.tsx";
 import Dashboard, { pipelineLabel, STAGE_LABEL, type RecentListing } from "./ui/Dashboard.tsx";
 import Img from "./ui/Img.tsx";
 
@@ -60,6 +60,10 @@ export default function App() {
   const [photoIdx, setPhotoIdx] = useState(0);
 
   useEffect(() => void desktop?.status().then(setStatus), []);
+  // Automation hook for the smoke/recording harness (electron/smoke.ts): jump the camera to an exact pose.
+  useEffect(() => {
+    (window as unknown as { __giSetPose?: (p: Pose) => void }).__giSetPose = (p) => setPose({ ...p });
+  }, []);
 
   // Generation status lives in the main process (persisted); the dashboard just reads it.
   useEffect(() => {
@@ -87,7 +91,7 @@ export default function App() {
     setSelectedTagId(null);
     setEditing(false);
     setPlacing(false);
-    setPose(PRESETS.Reset);
+    setPose(viewFor(a).presets.Reset);
     setTags(a ? await api.listTags(a.id) : []);
     setAssetError(a?.format === "glb" && a.storageKey ? await validateAssetUrl(a.storageKey) : null);
     setRecent(pushRecent({ id: l.id, title: l.listingTitle, secondaryId: l.secondaryId }));
@@ -134,6 +138,7 @@ export default function App() {
   const viewVersion = async (v: Listing3DAsset) => {
     setPickedVersion(v.id);
     setAsset(v);
+    setPose(viewFor(v).presets.Reset);
     setTags(await api.listTags(v.id));
     setSelectedTagId(null);
     setTab("360");
@@ -266,7 +271,7 @@ export default function App() {
                   )}
                   {viewable && !assetError && (
                     <div className="hud">
-                      {(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((k) => <button key={k} onClick={() => setPose({ ...PRESETS[k] })}>{k}</button>)}
+                      {Object.entries(viewFor(asset).presets).map(([k, p]) => <button key={k} onClick={() => setPose({ ...p })}>{k}</button>)}
                       {editing && <button className={placing ? "primary" : ""} onClick={() => setPlacing((p) => !p)}>{placing ? "Click the model…" : "+ Add tag"}</button>}
                     </div>
                   )}

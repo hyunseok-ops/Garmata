@@ -32,6 +32,19 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
     await js(`[...document.querySelectorAll('.hud button')].find((b) => b.textContent === 'Reset')?.click()`);
     await wait(1500);
   }
+  if (process.env.GI_SMOKE_VIEW_RESULT && process.env.GI_SMOKE_ORBIT) {
+    // Orbit recording: N frames around the vehicle at the Reset preset's distance and height.
+    const n = Number(process.env.GI_SMOKE_ORBIT);
+    fs.mkdirSync(path.join(out, "orbit"), { recursive: true });
+    for (let i = 0; i < n; i++) {
+      const t = (i / n) * Math.PI * 2 + Math.PI / 4;
+      await js(`window.__giSetPose({ position: [${(12.7 * Math.cos(t)).toFixed(3)}, 5, ${(12.7 * Math.sin(t)).toFixed(3)}], target: [0, 1.4, 0] })`);
+      await wait(i === 0 ? 1500 : 450); // camera rig eases toward each pose
+      fs.writeFileSync(path.join(out, "orbit", `${String(i).padStart(3, "0")}.png`), (await win.webContents.capturePage()).toPNG());
+    }
+    console.log(`ORBIT ${n} frames`);
+    return;
+  }
   if (process.env.GI_SMOKE_VIEW_RESULT && process.env.GI_SMOKE_FPS) {
     const fps = await js(`new Promise((resolve) => {
       const names = ["Front", "Right", "Rear", "Left", "Reset"]; let i = 0;
