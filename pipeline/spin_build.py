@@ -93,6 +93,7 @@ def align(photo_feat, frame_feat, frame_w: int):
     return M, inl, float(np.hypot(M[0, 0], M[1, 0]))
 
 
+SIZE_TOLERANCE = 0.12  # max truck-height difference between a real frame and its neighbours
 ZOOM_MAX = 1.6  # generated frames are 768 px upscaled 2x; zooming further than this looks soft
 
 
@@ -245,27 +246,63 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
         return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
 
     frames_dir = out_dir / "frames"
-    shutil.rmtree(frames_dir, ignore_errors=True)  # a previous (interpolated) build leaves more files
-    frames_dir.mkdir(parents=True)
-    out_frames = []
-    for slot, az in enumerate(azimuths):
-        pid = None
-        view = views[slot][:3] if slot in views else None
-        if slot in views:
-            pid = used_slot[slot][0]
-            base = Image.open(cache / f"{pid}.jpg").convert("RGB").crop(views[slot][3]).resize((OUT_W, OUT_H), Image.LANCZOS)
-            placed.append({"azimuth": az, "photo": pid, "inliers": used_slot[slot][2], "zoom": round(views[slot][0], 3)})
-        else:
-            z, cx, cy = gen_view(slot)
-            w, h = gw / z, gh / z
-            cx, cy = min(max(cx, w / 2), gw - w / 2), min(max(cy, h / 2), gh - h / 2)
-            view = (z, cx, cy)
-            box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
-            base = Image.fromarray(gen[slot]).resize((OUT_W, OUT_H), Image.LANCZOS, box=box)
-        name = f"{slot:03d}.jpg"
-        base.save(frames_dir / name, quality=88)
-        out_frames.append({"azimuth": az, "file": f"frames/{name}", "source": "real" if pid else "generated", "sourceImageId": pid,
-                           "view": [round(view[0], 4), round(view[1], 2), round(view[2], 2)]})  # zoom, centre in ring px
+
+    def render():
+        shutil.rmtree(frames_dir, ignore_errors=True)  # a previous (interpolated) build leaves more files
+        frames_dir.mkdir(parents=True)
+        placed.clear()
+        out_frames = []
+        for slot, az in enumerate(azimuths):
+            pid = None
+            view = views[slot][:3] if slot in views else None
+            if slot in views:
+                pid = used_slot[slot][0]
+                base = Image.open(cache / f"{pid}.jpg").convert("RGB").crop(views[slot][3]).resize((OUT_W, OUT_H), Image.LANCZOS)
+                placed.append({"azimuth": az, "photo": pid, "inliers": used_slot[slot][2], "zoom": round(views[slot][0], 3)})
+            else:
+                z, cx, cy = gen_view(slot)
+                w, h = gw / z, gh / z
+                cx, cy = min(max(cx, w / 2), gw - w / 2), min(max(cy, h / 2), gh - h / 2)
+                view = (z, cx, cy)
+                box = (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+                base = Image.fromarray(gen[slot]).resize((OUT_W, OUT_H), Image.LANCZOS, box=box)
+            name = f"{slot:03d}.jpg"
+            base.save(frames_dir / name, quality=88)
+            out_frames.append({"azimuth": az, "file": f"frames/{name}", "source": "real" if pid else "generated", "sourceImageId": pid,
+                               "view": [round(view[0], 4), round(view[1], 2), round(view[2], 2)]})  # zoom, centre in ring px
+        return out_frames
+
+    # Size check on the finished frames: a real photo whose truck is noticeably bigger or smaller than its neighbours'
+    # (bad alignment, or two real photos shot at different distances side by side) would jump; drop the worst one and
+    # re-render until none is off. Its slot falls back to the generated frame.
+    heights = {}
+
+    def truck_height(slot: int, source: str) -> float:
+        key = (slot, source, views.get(slot, (None,))[0])
+        if key not in heights:
+            a = np.array(Image.open(frames_dir / f"{slot:03d}.jpg").convert("RGB").resize((OUT_W // 2, OUT_H // 2)))
+            global _session
+            from rembg import new_session, remove
+            _session = _session or new_session("isnet-general-use")
+            rows = np.where((np.array(remove(Image.fromarray(a), session=_session, only_mask=True)) > 128).mean(1) > 0.01)[0]
+            heights[key] = float(rows[-1] - rows[0]) if len(rows) else 0.0
+        return heights[key]
+
+    for _ in range(len(views)):
+        out_frames = render()
+        n = len(azimuths)
+        worst, worst_dev = None, SIZE_TOLERANCE
+        for slot in views:
+            h = truck_height(slot, "real")
+            ref = np.mean([truck_height(j, out_frames[j]["source"]) for j in ((slot - 1) % n, (slot + 1) % n)])
+            dev = abs(h / ref - 1) if ref else 0
+            if dev > worst_dev:
+                worst, worst_dev = slot, dev
+        if worst is None:
+            break
+        print("drop", used_slot[worst][0], f"at {azimuths[worst]}: truck {worst_dev:.0%} off its neighbours", file=sys.stderr)
+        del views[worst]
+        real_slots.remove(worst)
 
     out_frames = interpolate(out_dir, out_frames, INTERP)
     spin = {"w": OUT_W, "h": OUT_H, "ring": manifest["ring"], "frames": out_frames}
