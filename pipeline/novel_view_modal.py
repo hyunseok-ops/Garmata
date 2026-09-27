@@ -30,6 +30,12 @@ image = (
     .run_commands(
         f"git clone https://github.com/Stability-AI/stable-virtual-camera.git /seva && cd /seva && git checkout {SEVA_COMMIT}",
         "cd /seva && pip install -e .",
+        # Imported at module load by seva/geometry.py and seva/data_io.py but missing from SEVA's pyproject.
+        'pip install "numpy==1.24.4" "scipy<1.14" "opencv-python-headless<4.11"',
+        # stabilityai/stable-diffusion-2-1-base was removed from Hugging Face. SEVA only needs its VAE; this mirror's
+        # vae/diffusion_pytorch_model.safetensors has the same sha256 (a1d99348...) as an independent second mirror.
+        "sed -i 's#stabilityai/stable-diffusion-2-1-base#sd2-community/stable-diffusion-2-1-base#' /seva/seva/modules/autoencoder.py",
+        "grep -q sd2-community /seva/seva/modules/autoencoder.py",
     )
 )
 app = modal.App("garage-intelligence-novel-view", image=image)
