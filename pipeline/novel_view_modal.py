@@ -1,0 +1,128 @@
+"""Novel-view generation on Modal with Stable Virtual Camera (SEVA) — docs/PLAN.md §8-§11.
+
+Input on the `gi-splats` volume:  novel/<listingId>/scene/{images/NNN.png, transforms.json, train_test_split_<N>.json}
+  (written by the desktop app's GI_NOVEL_PREP: real photos at their ring slots, generated slots with file_path null)
+Output:                           novel/<listingId>/posed/{input/, samples-rgb/, transforms.json}  (Nerfstudio-ready)
+                                  novel/<listingId>/generated/NNN.png                              (one image per azimuth)
+
+SEVA renders every null-path frame from the exact camera we asked for, conditioned on the real photos, so the posed
+dataset needs no feature matching. Weights are gated (Stability AI Non-Commercial License): the Hugging Face account
+behind the Modal `huggingface` secret must accept the license at https://huggingface.co/stabilityai/stable-virtual-camera.
+
+  uvx modal deploy pipeline/novel_view_modal.py
+  uvx modal run pipeline/novel_view_modal.py --check          # is the gated model reachable?
+"""
+import json
+import pathlib
+import shutil
+import subprocess
+import threading
+import time
+
+import modal
+
+SEVA_COMMIT = "fe19948e9b7bea261ab2db780a59656131404a83"  # ponytail: pinned; bump deliberately
+image = (
+    modal.Image.debian_slim(python_version="3.10")
+    .apt_install("git", "ffmpeg", "libgl1", "libglib2.0-0")
+    .pip_install("torch==2.6.0", "torchvision==0.21.0", index_url="https://download.pytorch.org/whl/cu124")
+    .run_commands(
+        f"git clone https://github.com/Stability-AI/stable-virtual-camera.git /seva && cd /seva && git checkout {SEVA_COMMIT}",
+        "cd /seva && pip install -e .",
+    )
+)
+app = modal.App("garage-intelligence-novel-view", image=image)
+vol = modal.Volume.from_name("gi-splats", create_if_missing=True)
+progress = modal.Dict.from_name("gi-progress", create_if_missing=True)
+DATA = pathlib.Path("/data")
+HF = modal.Secret.from_name("huggingface")
+
+
+def _report(key: str, stage: str, current: int | None = None, total: int | None = None, message: str | None = None) -> None:
+    if key:
+        progress[key] = json.dumps({"stage": stage, "current": current, "total": total, "message": message, "at": time.time()})
+
+
+@app.function(secrets=[HF], timeout=120)
+def check_access() -> str:
+    import os
+
+    from huggingface_hub import get_hf_file_metadata, hf_hub_url
+
+    try:
+        meta = get_hf_file_metadata(hf_hub_url("stabilityai/stable-virtual-camera", "model.safetensors"), token=os.environ.get("HF_TOKEN"))
+        return f"ok: model.safetensors {meta.size / 1e9:.1f} GB"
+    except Exception as e:
+        return f"no access: {type(e).__name__}: {str(e)[:200]}"
+
+
+@app.function(gpu="H100", timeout=3600, volumes={str(DATA): vol}, secrets=[HF])
+def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, seed: int = 23) -> dict:
+    t0 = time.time()
+    try:
+        vol.reload()
+        root = DATA / "novel" / listing_id
+        scene_src = root / "scene"
+        split_file = next(scene_src.glob("train_test_split_*.json"))
+        num_inputs = int(split_file.stem.rsplit("_", 1)[-1])
+        split = json.loads(split_file.read_text())
+        num_targets = len(split["test_ids"])
+        meta = json.loads((scene_src / "transforms.json").read_text())
+
+        work_in = pathlib.Path("/tmp/in")
+        shutil.rmtree(work_in, ignore_errors=True)
+        shutil.copytree(scene_src, work_in / "scene")
+        out_dir = pathlib.Path("/seva/work_dirs/demo/img2img/scene")
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+        _report(progress_key, "generating_views", 0, num_targets, f"Conditioning on {num_inputs} real photos")
+        done = threading.Event()
+
+        def watch() -> None:  # SEVA writes target frames into samples-rgb/ as chunks finish
+            while not done.wait(5):
+                n = len(list((out_dir / "samples-rgb").glob("*.png"))) if (out_dir / "samples-rgb").exists() else 0
+                _report(progress_key, "generating_views", min(n, num_targets), num_targets)
+
+        threading.Thread(target=watch, daemon=True).start()
+        cmd = ["python", "demo.py", "--data_path", str(work_in), "--data_items", "scene", "--task", "img2img",
+               "--num_inputs", str(num_inputs), "--H", str(meta["h"]), "--W", str(meta["w"]), "--cfg", str(cfg),
+               "--seed", str(seed), "--video_save_fps", "10"]
+        print("$", " ".join(cmd), flush=True)
+        proc = subprocess.run(cmd, cwd="/seva", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        done.set()
+        (root / "logs").mkdir(parents=True, exist_ok=True)
+        (root / "logs" / "seva.log").write_text(proc.stdout)
+        vol.commit()
+        print(proc.stdout[-4000:], flush=True)
+        if proc.returncode:
+            raise RuntimeError(f"SEVA failed ({proc.returncode}): {proc.stdout[-800:]}")
+
+        # Posed dataset for Splatfacto: SEVA's own transforms.json (OpenGL c2w, per-frame intrinsics at output size).
+        posed = root / "posed"
+        shutil.rmtree(posed, ignore_errors=True)
+        shutil.copytree(out_dir, posed, ignore=shutil.ignore_patterns("*.mp4"))
+        frames = json.loads((posed / "transforms.json").read_text())["frames"]
+        if len(frames) != len(meta["frames"]):
+            raise RuntimeError(f"SEVA returned {len(frames)} frames, expected {len(meta['frames'])}")
+        # One image per azimuth for manual inspection (§8): frame order is preserved (sorted train+test indices).
+        generated = root / "generated"
+        shutil.rmtree(generated, ignore_errors=True)
+        generated.mkdir(parents=True)
+        for f_in, f_out in zip(meta["frames"], frames):
+            shutil.copy(posed / f_out["file_path"], generated / f"{int(f_in['azimuth']):03d}.png")
+        vol.commit()
+        _report(progress_key, "generating_views", num_targets, num_targets, "Views generated")
+        return {"inputs": num_inputs, "targets": num_targets, "w": meta["w"], "h": meta["h"], "seconds": round(time.time() - t0)}
+    except Exception as e:
+        _report(progress_key, "failed", message=str(e)[:300])
+        raise
+
+
+@app.local_entrypoint()
+def main(check: bool = False, listing: str = ""):
+    if check:
+        print(modal.Function.from_name(app.name, "check_access").remote())
+        return
+    assert listing, "--listing required"
+    call = modal.Function.from_name(app.name, "generate_views").spawn(listing)
+    print("spawned", call.object_id)

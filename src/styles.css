@@ -87,3 +87,33 @@ dd { margin: 0; text-align: right; }
 .angle-photo { position: absolute; right: 12px; bottom: 60px; width: 300px; background: rgba(23,24,28,.92); border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
 .angle-photo img { width: 100%; aspect-ratio: 3/2; object-fit: cover; border-radius: 5px; cursor: pointer; display: block; }
 .angle-photo .meta { padding: 5px 2px 0; }
+
+/* Dashboard (docs/PLAN.md §16-§20, §36-§37) */
+.dashboard { grid-column: span 3; padding: 24px 28px; overflow: auto; }
+.dashboard section { margin-top: 20px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.gen-card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 6px; }
+.gen-card.failed { border-color: #5a2a2a; }
+.gen-card.ready { border-color: #2a4a36; }
+.gen-head { display: flex; justify-content: space-between; gap: 8px; cursor: pointer; }
+.gen-card .title { font-weight: 600; }
+.gen-stage { font-weight: 600; font-size: 13px; }
+.gen-stage.ready { color: #7fd39a; }
+.gen-stage.failed { color: #f08080; }
+.err { color: #f08080; }
+.progress { display: flex; align-items: center; gap: 10px; }
+.progress .bar { flex: 1; height: 8px; background: #23252c; border-radius: 999px; overflow: hidden; }
+.progress .bar > div { height: 100%; background: var(--accent-2); transition: width .4s; }
+.steps { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.steps li { color: var(--muted); }
+.steps li.done { color: #7fd39a; }
+.steps li.active { color: var(--fg); }
+.steps li.failed { color: #f08080; }
+.steps .mark { display: inline-block; width: 18px; }
+.recent { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.photos-tab { padding: 16px; overflow: auto; }
+.photos.wide { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.pill.legacy { background: #2a2c34; color: var(--muted); }
+.pill.novel-view-splat { background: #2b2540; color: #c3b1ff; }
+.pill.capture-splat { background: #1e3a2a; color: #7fd39a; }
+.pill.posed-test { background: #3a321e; color: #e6c37a; }

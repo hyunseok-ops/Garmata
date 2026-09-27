@@ -5,3 +5,4 @@ dist-electron
 .env
 pipeline/inputs
 release
+experiments/novel-view/*/

@@ -1,15 +1,16 @@
-import { app, BrowserWindow, ipcMain, nativeImage, net, protocol, shell } from "electron";
+import { app, BrowserWindow, ipcMain, net, protocol, shell } from "electron";
 import dns from "node:dns";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import pg from "pg";
-import type { Listing3DAsset, Listing3DTag, ListingDetail, ListingSummary } from "../src/data/types.ts";
-import { pickGenerationPhotos } from "../src/data/photos.ts";
+import type { Generation, Listing3DAsset, Listing3DTag, ListingDetail, ListingSummary, SplatPipeline } from "../src/data/types.ts";
+import { ringAzimuths, RING, buildTransforms } from "../src/data/novel.ts";
+import { drive, newGeneration, prep, resumeAll, type Deps } from "./novel.ts";
 import { smoke } from "./smoke.ts";
 
 app.setName("garage-intelligence"); // userData path must not depend on how Electron was launched
-dns.setDefaultResultOrder("ipv4first"); // Meshy over IPv6 stalls on this network
+dns.setDefaultResultOrder("ipv4first"); // long-lived HTTPS over IPv6 stalls on this network
 // Dev: repo-root .env. Packaged: <userData>/.env (Application Support/garage-intelligence/.env), never inside the app bundle.
 for (const envPath of [path.join(import.meta.dirname, "../.env"), path.join(app.getPath("userData"), ".env")]) {
   try { process.loadEnvFile(envPath); break; } catch { /* try next */ }
@@ -59,10 +60,9 @@ async function getListing(id: string): Promise<ListingDetail> {
 
 // ---- Local asset store -------------------------------------------------------------------------
 // ponytail: JSON file + GLBs in userData. Move to Garage DB/object storage when a second machine needs the data.
-type Store = { assets: Listing3DAsset[]; tags: Listing3DTag[]; jobs: Record<string, string> }; // jobs: assetId -> provider task id
+type Store = { assets: Listing3DAsset[]; tags: Listing3DTag[]; jobs: Record<string, string>; generations?: Record<string, Generation> };
 const dataDir = () => path.join(app.getPath("userData"), "3d");
 const storePath = () => path.join(dataDir(), "store.json");
-const glbPath = (assetId: string) => path.join(dataDir(), `${assetId}.glb`);
 const assetFile = (assetId: string) => [".glb", ".ply", ".spz"].map((e) => path.join(dataDir(), assetId + e)).find((f) => fs.existsSync(f));
 function loadStore(): Store {
   try { return JSON.parse(fs.readFileSync(storePath(), "utf8")); } catch { return { assets: [], tags: [], jobs: {} }; }
@@ -74,98 +74,28 @@ function currentAsset(s: Store, listingId: string) {
   return mine.find((a) => a.reviewStatus === "approved") ?? mine[0] ?? null;
 }
 
-// ---- Generation provider: Meshy multi-image-to-3D ------------------------------------------------
-const MESHY = "https://api.meshy.ai/openapi/v1/multi-image-to-3d";
-const meshyKey = () => process.env.MESHY_API_KEY;
-async function meshy(pathname: string, init?: RequestInit) {
-  const res = await fetch(MESHY + pathname, { ...init, signal: AbortSignal.timeout(init?.method === "POST" ? 300_000 : 60_000), headers: { Authorization: `Bearer ${meshyKey()}`, "Content-Type": "application/json", ...(init?.headers ?? {}) } });
-  if (!res.ok) throw new Error(`Meshy ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  return res.json();
-}
-
-// Listing originals run to 8K/30MB and providers reject them; ship 1600px JPEG data URIs instead.
-async function generationInput(url: string): Promise<string> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-  if (!res.ok) throw new Error(`Photo download failed (${res.status})`);
-  const img = nativeImage.createFromBuffer(Buffer.from(await res.arrayBuffer()));
-  const { width } = img.getSize();
-  const small = width > 1600 ? img.resize({ width: 1600, quality: "best" }) : img;
-  return `data:image/jpeg;base64,${small.toJPEG(85).toString("base64")}`;
-}
-
-async function requestGeneration(listingId: string): Promise<Listing3DAsset> {
-  if (!meshyKey()) throw new Error("MESHY_API_KEY is not set; generation provider unavailable");
-  const store = loadStore();
-  const live = store.assets.find((a) => a.listingId === listingId && (a.processingStatus === "queued" || a.processingStatus === "processing"));
-  if (live) return live; // no duplicate jobs
-  const listing = await getListing(listingId);
-  const inputs = pickGenerationPhotos(listing.photos);
-  if (inputs.length === 0) throw new Error("No exterior photos to generate from");
-  const fingerprint = inputs.map((p) => p.id).join("|");
-  const version = Math.max(0, ...store.assets.filter((a) => a.listingId === listingId).map((a) => a.version)) + 1;
-  const asset: Listing3DAsset = {
-    id: `${listing.secondaryId}-v${version}`, listingId, version, representation: "reconstructed", format: "glb", storageKey: null,
-    sourceImageIds: inputs.map((p) => p.id), sourceFingerprint: fingerprint, pipelineVersion: "meshy-multi-image-ultra-1",
-    transform: { scale: 1, position: [0, 0, 0], rotationDeg: [0, 180, 0] }, // Meshy meshes face -X; the viewer's presets assume +X
-    processingStatus: "queued", reviewStatus: "pending", createdAt: new Date().toISOString(),
-  };
-  // Meshy fetches the source photos before answering the POST; this can take minutes.
-  const image_urls = await Promise.all(inputs.map((p) => generationInput(p.url)));
-  const { result: taskId } = await meshy("", {
-    method: "POST",
-    // Ultra tier: 2k geometry + 4k PBR textures. Costs about double the default but keeps lettering and equipment legible.
-    body: JSON.stringify({ image_urls, should_texture: true, enable_pbr: true, ai_model: "latest", geometry_resolution: "2k", texture_resolution: "4k", target_formats: ["glb"] }),
-  });
-  store.assets.push(asset);
-  store.jobs[asset.id] = taskId;
-  saveStore(store);
-  void pollJob(asset.id);
-  return asset;
-}
-
-async function pollJob(assetId: string) {
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 10_000));
-    const store = loadStore();
-    const asset = store.assets.find((a) => a.id === assetId);
-    const taskId = store.jobs[assetId];
-    if (!asset || !taskId) return;
-    try {
-      const task = await meshy(`/${taskId}`);
-      if (task.status === "SUCCEEDED") {
-        const glb = await fetch(task.model_urls.glb);
-        if (!glb.ok) throw new Error(`GLB download failed (${glb.status})`);
-        fs.mkdirSync(dataDir(), { recursive: true });
-        fs.writeFileSync(glbPath(assetId), Buffer.from(await glb.arrayBuffer()));
-        asset.processingStatus = "ready";
-        asset.storageKey = `gi-asset://${assetId}`;
-        delete store.jobs[assetId];
-      } else if (task.status === "FAILED" || task.status === "CANCELED") {
-        asset.processingStatus = "failed";
-        asset.error = task.task_error?.message ?? task.status;
-        delete store.jobs[assetId];
-      } else {
-        asset.processingStatus = "processing";
-      }
-      saveStore(store);
-      if (!store.jobs[assetId]) return;
-    } catch (e) {
-      asset.processingStatus = "failed";
-      asset.error = String((e as Error).message);
-      delete store.jobs[assetId];
-      saveStore(store);
-      return;
-    }
-  }
-}
-
 // ---- IPC -----------------------------------------------------------------------------------------
-ipcMain.handle("status", () => ({ garage: !!db, provider: !!meshyKey(), sync: garageConfigured() }));
+ipcMain.handle("status", () => ({ garage: !!db, sync: garageConfigured() }));
 ipcMain.handle("listings.search", (_e, q: string) => searchListings(q));
 ipcMain.handle("listings.get", (_e, id: string) => getListing(id));
 ipcMain.handle("assets.current", (_e, listingId: string) => currentAsset(loadStore(), listingId));
 ipcMain.handle("assets.list", (_e, listingId: string) => loadStore().assets.filter((a) => a.listingId === listingId).sort((a, b) => b.version - a.version));
-ipcMain.handle("assets.generate", (_e, listingId: string) => requestGeneration(listingId));
+// Ready-for-review queue: 360 versions only (legacy meshes are not part of the MVP product).
+ipcMain.handle("assets.pending", () => loadStore().assets.filter((a) => a.format === "splat" && a.processingStatus === "ready" && a.reviewStatus === "pending"));
+ipcMain.handle("generations.list", () => Object.values(loadStore().generations ?? {}).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)));
+ipcMain.handle("generations.start", async (_e, listingId: string, pipeline: SplatPipeline = "novel-view-splat") => {
+  const l = await getListing(listingId);
+  const g = newGeneration(deps, listingId, l.listingTitle, pipeline, l.secondaryId);
+  if (g.stage === "queued") void drive(deps, g);
+  return g;
+});
+ipcMain.handle("generations.retry", (_e, id: string) => {
+  const old = loadStore().generations?.[id];
+  if (!old) throw new Error(`no generation ${id}`);
+  const g = newGeneration(deps, old.listingId, old.title, old.pipeline, old.secondaryId); // failed = terminal, so this is a fresh run
+  if (g.stage === "queued") void drive(deps, g);
+  return g;
+});
 ipcMain.handle("assets.review", async (_e, assetId: string, reviewStatus: "approved" | "rejected") => {
   const s = loadStore();
   const a = s.assets.find((x) => x.id === assetId);
@@ -196,20 +126,59 @@ function createWindow() {
   if (process.env.GI_SMOKE_OUT) void smoke(win, process.env.GI_SMOKE_OUT, process.env.GI_SMOKE_QUERY ?? "").finally(() => app.exit(0));
 }
 
-// Headless: GI_GENERATE=<listingId,...> submits multi-image jobs for those listings, waits for them, exits.
-async function generateCli(ids: string[]) {
-  for (const id of ids) {
-    const a = await requestGeneration(id);
-    console.log(`submitted ${a.id} from ${a.sourceImageIds.length} photos`);
+// ---- Novel-view 360 pipeline (electron/novel.ts) -----------------------------------------------
+const deps: Deps = {
+  repoRoot: path.join(import.meta.dirname, ".."),
+  getListing,
+  loadGenerations: () => loadStore().generations ?? {},
+  saveGeneration: (g) => { const s = loadStore(); s.generations = { ...(s.generations ?? {}), [g.id]: g }; saveStore(s); },
+  importSplat: (listingId, file, pipeline, scale) =>
+    importAsset(listingId, file, pipeline, pipeline === "posed-test" ? "illustrative" : "reconstructed", { scale, position: [0, 0, 0], rotationDeg: [0, 0, 0] }),
+  renderRing,
+};
+
+// posed-test: render the listing's current mesh from the exact 24 ring cameras in a hidden window, so the
+// pose -> Splatfacto -> viewer chain can be verified without the view generator.
+async function renderRing(listingId: string, outDir: string) {
+  const asset = currentAsset(loadStore(), listingId);
+  if (!asset || asset.format !== "glb") throw new Error("posed-test needs an existing mesh version to render");
+  const win = new BrowserWindow({
+    width: RING.w, height: RING.h, useContentSize: true, show: false,
+    webPreferences: { preload: path.join(import.meta.dirname, "preload.mjs"), contextIsolation: true, sandbox: true, offscreen: false },
+  });
+  const frames = new Map<number, Buffer>();
+  const done = new Promise<void>((resolve, reject) => {
+    const onFrame = (_e: Electron.IpcMainEvent, az: number, dataUrl: string) => frames.set(az, Buffer.from(dataUrl.split(",")[1], "base64"));
+    const onDone = (_e: Electron.IpcMainEvent, err?: string) => { ipcMain.off("ring.frame", onFrame); ipcMain.off("ring.done", onDone); err ? reject(new Error(err)) : resolve(); };
+    ipcMain.on("ring.frame", onFrame);
+    ipcMain.on("ring.done", onDone);
+  });
+  const hash = `ring-render=${encodeURIComponent(asset.id)}`;
+  if (process.env.VITE_DEV_SERVER_URL) await win.loadURL(`${process.env.VITE_DEV_SERVER_URL}#${hash}`);
+  else await win.loadFile(path.join(import.meta.dirname, "../dist/index.html"), { hash });
+  await Promise.race([done, new Promise((_, r) => setTimeout(() => r(new Error("ring render timed out")), 120_000))]).finally(() => win.destroy());
+  const views = ringAzimuths().map((azimuth) => ({ azimuth, file: `images/${String(azimuth).padStart(3, "0")}.png`, source: "real" as const }));
+  for (const v of views) {
+    const png = frames.get(v.azimuth);
+    if (!png) throw new Error(`ring render missing ${v.azimuth}°`);
+    fs.writeFileSync(path.join(outDir, v.file), png);
   }
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 15_000));
-    const s = loadStore();
-    const mine = s.assets.filter((a) => ids.includes(a.listingId));
-    console.log(mine.map((a) => `${a.id}: ${a.processingStatus}${a.error ? " " + a.error : ""}`).join(" | "));
-    // Also wait for jobs resumed from a previous run, so nothing is left half-polled when this process exits.
-    if (mine.every((a) => a.processingStatus === "ready" || a.processingStatus === "failed") && Object.keys(s.jobs).length === 0) return;
-  }
+  fs.writeFileSync(path.join(outDir, "transforms.json"), JSON.stringify(buildTransforms(views), null, 2));
+}
+
+async function driveCli(listingIds: string[], pipeline: SplatPipeline, stopAfterViews = false) {
+  const gens = await Promise.all(listingIds.map(async (id) => {
+    const l = await getListing(id);
+    return newGeneration(deps, id, l.listingTitle, pipeline, l.secondaryId);
+  }));
+  const tick = setInterval(() => {
+    const all = loadStore().generations ?? {};
+    console.log(gens.map((g) => { const x = all[g.id]; return `${x.title}: ${x.stage}${x.total ? ` ${x.current ?? 0}/${x.total}` : ""}${x.error ? ` (${x.error})` : ""}`; }).join(" | "));
+  }, 20_000);
+  await Promise.all(gens.map((g) => drive(deps, g, stopAfterViews ? "views" : undefined)));
+  clearInterval(tick);
+  const all = loadStore().generations ?? {};
+  for (const g of gens) console.log(`${all[g.id].title}: ${all[g.id].stage}${all[g.id].error ? ` (${all[g.id].error})` : ""}${all[g.id].assetId ? ` -> ${all[g.id].assetId}` : ""}`);
 }
 
 // ---- Garage sync (admin oRPC, OpenAPI routes) --------------------------------------------------
@@ -317,7 +286,7 @@ async function seedTags(assetId: string) {
 
 // Headless: GI_IMPORT=<listingId>,<file.ply|.glb>,<pipelineVersion>[,illustrative] registers an externally produced asset version.
 // GI_TRANSFORM='{"scale":1,"position":[0,0,0],"rotationDeg":[180,0,0]}' sets the reviewed normalization for splats.
-function importCli(listingId: string, file: string, pipelineVersion: string, representation: Listing3DAsset["representation"]) {
+function importAsset(listingId: string, file: string, pipelineVersion: string, representation: Listing3DAsset["representation"], transform?: Listing3DAsset["transform"]): string {
   const s = loadStore();
   const version = Math.max(0, ...s.assets.filter((a) => a.listingId === listingId).map((a) => a.version)) + 1;
   const ext = path.extname(file).toLowerCase();
@@ -327,14 +296,27 @@ function importCli(listingId: string, file: string, pipelineVersion: string, rep
   s.assets.push({
     id, listingId, version, representation, format: ext === ".glb" ? "glb" : "splat", storageKey: `gi-asset://${id}`,
     sourceImageIds: [], sourceFingerprint: `import:${path.basename(file)}`, pipelineVersion, processingStatus: "ready", reviewStatus: "pending",
-    createdAt: new Date().toISOString(), ...(process.env.GI_TRANSFORM ? { transform: JSON.parse(process.env.GI_TRANSFORM) } : {}),
+    createdAt: new Date().toISOString(), transform: transform ?? (process.env.GI_TRANSFORM ? JSON.parse(process.env.GI_TRANSFORM) : undefined),
   });
   saveStore(s);
   console.log(`imported ${id} (${ext}) for listing ${listingId}`);
+  return id;
 }
 
 app.whenReady().then(() => {
-  for (const assetId of Object.keys(loadStore().jobs)) void pollJob(assetId); // resume after restart, in every mode
+  protocol.handle("gi-asset", (req) => {
+    const id = path.basename(new URL(req.url).hostname || new URL(req.url).pathname);
+    const file = assetFile(id.replace(/[^a-z0-9_-]/gi, ""));
+    return file ? net.fetch(pathToFileURL(file).href) : new Response("not found", { status: 404 });
+  });
+  const headless = (task: Promise<unknown>) => void task.catch((e) => console.error(e)).finally(() => app.exit(0));
+  // Plan §31: separate phases for debugging, plus GI_GENERATE for the whole chain.
+  if (process.env.GI_NOVEL_PREP) {
+    return headless((async () => { for (const id of process.env.GI_NOVEL_PREP!.split(",")) { const m = await prep(deps, id); console.log(`${m.title}: ${m.views.filter((v) => v.source === "real").length} real / 24, rejected ${JSON.stringify(m.rejected)} -> experiments/novel-view/${id}`); } })());
+  }
+  if (process.env.GI_NOVEL_GENERATE) return headless(driveCli(process.env.GI_NOVEL_GENERATE.split(","), "novel-view-splat", true));
+  if (process.env.GI_NOVEL_SPLAT || process.env.GI_GENERATE) return headless(driveCli((process.env.GI_NOVEL_SPLAT ?? process.env.GI_GENERATE)!.split(","), "novel-view-splat"));
+  if (process.env.GI_NOVEL_RENDER_TEST) return headless(driveCli(process.env.GI_NOVEL_RENDER_TEST.split(","), "posed-test"));
   if (process.env.GI_SYNC) {
     // GI_SYNC=<assetId,...|all> pushes local assets, files, review state and tags to Garage.
     const s = loadStore();
@@ -353,19 +335,11 @@ app.whenReady().then(() => {
   }
   if (process.env.GI_IMPORT) {
     const [listingId, file, pipelineVersion = "manual", rep] = process.env.GI_IMPORT.split(",");
-    importCli(listingId, file, pipelineVersion, rep === "illustrative" ? "illustrative" : "reconstructed");
+    importAsset(listingId, file, pipelineVersion, rep === "illustrative" ? "illustrative" : "reconstructed");
     app.exit(0);
     return;
   }
-  if (process.env.GI_GENERATE) {
-    void generateCli(process.env.GI_GENERATE.split(",")).catch((e) => console.error(e)).finally(() => app.exit(0));
-    return;
-  }
-  protocol.handle("gi-asset", (req) => {
-    const id = path.basename(new URL(req.url).hostname || new URL(req.url).pathname);
-    const file = assetFile(id.replace(/[^a-z0-9_-]/gi, ""));
-    return file ? net.fetch(pathToFileURL(file).href) : new Response("not found", { status: 404 });
-  });
+  resumeAll(deps); // generations interrupted by a restart continue polling their Modal calls
   createWindow();
   app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });

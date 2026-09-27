@@ -1,205 +1,1719 @@
-# Garage Intelligence — Implementation Plan
+# Garage Intelligence — MVP Plan
 
-Date: September 25, 2026  
-Status: Proposed MVP; no implementation or generation provider selected yet.
+**Date:** 2026-09-27  
+**Repo:** `github.com/hyunseok-ops/Garmata`
 
-## 1. Product goal
+## 1. MVP Goal
 
-Build Garage Intelligence, a desktop application with a persistent sidebar for multiple Garage tools. Its first feature, **3D Listings**, lets users select a vehicle, explore a 3D representation, and click tagged parts to inspect listing photos and specifications.
+The MVP should answer one core question:
 
-The target experience is inspired by Schemata's interactive equipment exploration. The first version supports navigation and informational tags. Moving equipment, opening doors, mechanical simulations, and reconstructed interiors are outside the MVP.
+> Can Garage turn the sparse exterior photos already available on a listing into a useful, visually convincing 360° vehicle experience without requiring a new capture workflow?
 
-## 2. MVP experience
+The MVP is focused on the generation pipeline and viewer experience.
 
-1. Open Garage Intelligence and sign in with an authorized Garage account.
-2. Select **3D Listings** in the sidebar.
-3. Search listings by title or ID and select a vehicle.
-4. Open an existing 3D asset or request generation from available listing photos.
-5. Rotate, zoom, and pan around the vehicle; use Front, Rear, Left, Right, and Reset controls.
-6. Click a part tag to select it and focus the camera on that area.
-7. Read the part's details and view original listing photos in an inspection panel.
+The following are **not MVP priorities**:
 
-Example: clicking **Pump Panel** displays the listing's pump-panel photos, manufacturer, rated GPM, and pump hours when those facts are available.
+- authentication
+- Supabase production integration
+- public listing-page integration
+- advanced roles/permissions
+- automatic tag generation
+- code signing / auto-update
+- Windows support
+- production-grade job infrastructure
 
-## 3. Interface
+The existing Electron app and local asset storage are sufficient for the MVP.
 
-| Area | Contents |
-| --- | --- |
-| Persistent sidebar | Garage Intelligence branding, 3D Listings, Settings; additional features added as they ship |
-| Listing browser | Search, thumbnail, title, listing ID, and 3D processing status |
-| Viewer header | Selected listing, asset representation label, generation/retry action for authorized users |
-| Main viewport | Vehicle, anchored tags, navigation controls, preset viewpoints |
-| Inspection panel | Selected part, original photos, specifications, descriptions, and source information |
-| Editor mode | Add, move, rename, and delete tags; attach photos and approved listing fields |
+---
 
-Keep the viewer reusable so it can later be embedded in Garage's web listing pages. Desktop packaging should not be required for its core interaction logic.
+# 2. Product Direction
 
-## 4. Strategy for obtaining the 3D vehicle
+Garage Intelligence will no longer treat generated polygon meshes as a core product path.
 
-### Preferred path: reconstruct the actual listing
+The MVP will focus on a single visual representation:
 
-Use available exterior listing photos as input to a reconstruction or image-to-3D pipeline. Evaluate the result before exposing it to users. Sparse photos may produce distorted geometry or invented details, especially on unseen surfaces.
+> **Gaussian splat / photo-based 360° representation**
 
-Do not promise automatic, accurate reconstruction for every listing. A generated model is a visual aid, not proof of vehicle condition or dimensions. Keep original photos readily accessible.
+There will be two ways to create one:
 
-### Optional fallback: illustrative templates
+```text
+Existing sparse listing photos
+        ↓
+Novel-view generation
+        ↓
+Synthetic intermediate views
+        ↓
+Known camera poses
+        ↓
+Gaussian reconstruction
 
-If reconstruction quality is insufficient, use a licensed or commissioned 3D template for a vehicle category such as a pumper, aerial, tanker, or ambulance. Attach the selected listing's real photos and facts to that template.
 
-Label this mode **Illustrative model**. Do not present its compartment layout or proportions as an exact match. Templates are an optional fallback, not a replacement for the goal of reconstructing actual listings.
+Continuous walkaround capture
+        ↓
+Camera pose estimation
+        ↓
+Gaussian reconstruction
+```
 
-The supplied side-view truck illustration can inform a future 2D fallback. A flat illustration alone does not supply the geometry needed to rotate a vehicle in 3D.
+The first path is the primary MVP experiment.
 
-### Role of vPIC
+The second path is the high-confidence photo-real pipeline for future captures.
 
-Use vPIC optionally to enrich available VIN-derived vehicle facts. Its documented API provides vehicle/manufacturer information, not a library of 3D models or vehicle drawings. Missing fields remain unknown. Do not infer pump, tank, compartment, or aftermarket equipment details solely from VIN decoding.
+---
 
-## 5. First milestone: validate the hardest dependency
+# 3. Core User Experience
 
-Before selecting a generation provider or building the full desktop workflow:
+A listing should contain:
 
-- Select 5–10 representative listings with permission to process their images.
-- Include both good exterior coverage and sparse photo sets.
-- Evaluate candidate reconstruction approaches against the same inputs.
-- Compare body shape, axle count, cab shape, major equipment, texture quality, and all visible sides with source photos.
-- Record generation time, cost, asset size, viewer performance, and manual cleanup required.
-- Verify commercial usage rights and available output formats.
-- Identify whether improved walkaround capture is necessary.
+```text
+Listing
+├── 360 View
+├── Real Photos
+├── Inspection Tags
+└── Versions
+```
 
-**Decision gate:** choose a reconstruction approach only if it produces useful, reviewable results on representative listings. Otherwise ship an explicitly illustrative pilot and/or define a guided photo capture workflow. Do not select a provider based only on its demo examples.
+The 360 viewer gives the user spatial understanding of the vehicle.
 
-## 6. Proposed architecture
+The original listing photographs remain the factual evidence.
 
-These are implementation proposals, to be checked against the Garage repository before coding.
+While the user rotates around the splat, Garage Intelligence continues showing the real listing photo closest to the current viewing direction.
 
-| Component | Responsibility |
-| --- | --- |
-| Electron desktop shell | Application window, desktop lifecycle, controlled integration with the operating system |
-| React + TypeScript UI | Sidebar, listing browser, inspection panel, generation states, tag editor |
-| Three.js-based viewer | Render assets, camera controls, picking, anchored labels; evaluate React Three Fiber for React integration |
-| Garage backend | Authorize access, retrieve listing data, manage assets and tags, start generation jobs |
-| Background worker | Prepare photos, invoke selected generation service, validate output, store result |
-| Object storage | Versioned 3D assets, thumbnails, and generated supporting files |
-| Database | Asset lifecycle, provenance, job references, tags, review status |
+Example:
 
-Prefer GLB for mesh assets if supported by the selected pipeline. If reconstruction quality favors Gaussian splats, explicitly evaluate renderer compatibility and tag placement before adopting them. Keep generation behind a provider adapter so provider changes do not require rewriting the UI.
+```text
+┌─────────────────────────────────────────────┐
+│                                             │
+│                 360 VIEW                    │
+│                                             │
+│                   🚒                        │
+│                                             │
+│                                             │
+│                              ┌───────────┐  │
+│                              │ REAL      │  │
+│                              │ PHOTO     │  │
+│                              └───────────┘  │
+└─────────────────────────────────────────────┘
+```
 
-Run heavy generation on the backend. The Electron app submits jobs and displays results. Reuse existing Garage infrastructure where suitable; confirm exact worker, storage, and authentication integrations during implementation.
+The generated representation should help answer:
 
-## 7. Generation lifecycle
+> "Where is everything on this truck?"
 
-1. Backend checks access to the listing and collects selected source image IDs.
-2. Create an asset version and job keyed by listing, source-image fingerprint, and pipeline version.
-3. Worker prepares inputs and calls the selected generation pipeline.
-4. Validate output format, size, loadability, and basic orientation; normalize coordinates where necessary.
-5. Store the asset and mark it ready for review.
-6. Reviewer checks it against source photos, adds tags, and approves or rejects it.
-7. Approved assets become available in the viewer.
+The original photographs should answer:
 
-Suggested processing states: `queued`, `processing`, `ready`, `failed`. Keep review states separate: `pending`, `approved`, `rejected`.
+> "What does this part actually look like?"
 
-Retries must not create duplicate jobs or overwrite approved assets. Retain the previous approved version if regeneration fails. Changed source photos should mark the existing asset as potentially stale, not silently replace it.
+Generated imagery must never replace the original photographs as factual evidence.
 
-## 8. Part tagging
+---
 
-Start with manual placement. An editor clicks the model surface, names the tag, and attaches relevant photos and listing fields.
+# 4. Sparse Listing Photo Pipeline
 
-Initial categories: Cab, Pump Panel, Compartments, Engine, Wheels/Tires, Rear, and Other. Only create tags supported by available information. An engine tag can link to an engine-bay photo without reconstructing the engine itself.
+This is the main MVP experiment.
 
-- Store tags in model-local coordinates and bind them to an exact asset version.
-- Save an optional camera position and target for each tag.
-- Distinguish selected tags clearly; hide or fade tags behind the vehicle.
-- Provide a parts list so users can select tags without relying on tiny markers.
-- Re-review or remap tags after regeneration; old coordinates may no longer match.
-- Consider automated tag suggestions only after the manual workflow is useful.
+Current Garage listings often contain views such as:
 
-## 9. Proposed data model
+```text
+front
+front 3/4
+side
+rear 3/4
+rear
+```
 
-| Entity | Main fields |
-| --- | --- |
-| Listing3DAsset | ID, listing ID, version, representation type, asset storage key, format, source image IDs/fingerprint, provider/pipeline version, processing status, review status, error, timestamps |
-| Listing3DTag | ID, asset version ID, label, category, local position, optional camera pose, description, display order |
-| Tag evidence | Tag ID, source image IDs, linked listing field names, optional reviewed overrides and provenance |
+but do not contain enough overlapping photographs for traditional photogrammetry.
 
-Use existing listing fields as the authoritative source wherever possible. Avoid copying facts into disconnected descriptions that become stale. Record model orientation and normalization so placement and preset views are reproducible.
+Previous testing showed:
 
-## 10. Proposed backend operations
+```text
+Sparse listing gallery
+        ↓
+COLMAP / LightGlue
+        ↓
+insufficient overlap
+        ↓
+poor camera alignment
+        ↓
+fragmented reconstruction
+```
 
-- List/search authorized listings with their current 3D status.
-- Retrieve the current approved asset and its tags.
-- Request generation or retry for a listing.
-- Retrieve job status and readable errors.
-- Create, update, and delete tags for an asset version.
-- Approve or reject an asset version.
+Instead, the new pipeline will be:
 
-These are logical operations, not committed route names. Follow existing Garage API conventions when implementing them.
+```text
+Sparse listing photographs
+        ↓
+View normalization
+        ↓
+View-angle assignment
+        ↓
+Novel-view generation
+        ↓
+Intermediate synthetic views
+        ↓
+Known camera poses
+        ↓
+Splatfacto
+        ↓
+PLY / SPZ
+        ↓
+Garage Intelligence Viewer
+```
 
-## 11. Access and reliability
+---
 
-- Enforce existing listing permissions server-side for both assets and linked photos.
-- Restrict generation, editing, and approval to appropriate roles.
-- Keep provider credentials on the backend.
-- Use an isolated Electron renderer with a narrow desktop bridge; do not give listing content arbitrary system access.
-- Validate downloaded asset types and sizes before rendering.
-- Provide loading, failed, missing-photo, and unsupported-rendering states.
-- Cap generation concurrency and record per-job cost where available.
-- Obtain appropriate asset licenses for any reusable templates.
+# 5. Input Selection
 
-## 12. Delivery sequence
+The pipeline should use exterior images only.
 
-### Phase 0 — Reconstruction evaluation
+Existing `ListingImage.viewLabel` values can identify useful images.
 
-Complete the representative-listing experiment and choose the initial asset approach. Deliver a small reviewed sample and documented limitations.
+Priority input views:
 
-### Phase 1 — Desktop shell and viewer
+```text
+front
+front_34
+side
+rear_34
+rear
+```
 
-Create the branded Electron/React shell and 3D Listings screen. Load one known-good asset, implement camera controls, and display example tags. This phase can use fixtures and does not establish reconstruction success.
+When available, the opposite side should also be included.
 
-### Phase 2 — Garage listing integration
+Ideal input:
 
-Connect authentication, listing search, photos, and specs. Load stored assets by listing and show honest processing and review states.
+```text
+front
+front-left
+left
+rear-left
+rear
+rear-right
+right
+front-right
+```
 
-### Phase 3 — Tag editor
+A listing does not need all eight views for the experiment.
 
-Implement placement, editing, linked evidence, camera focus, and persistence. Verify saved tags reload correctly on the same asset version.
+Initial target:
 
-### Phase 4 — Generation and review
+> 5–10 useful exterior photographs.
 
-Integrate the selected pipeline, jobs, storage, retries, asset versioning, and approval workflow. Keep unapproved results out of the default viewer.
+Interior images, documents, engine-bay photos, pump-panel closeups, and compartment closeups should not be fed into the exterior reconstruction pipeline.
 
-### Phase 5 — Internal pilot
+---
 
-Package for the team's target desktop OS, validate on representative hardware, and collect feedback on usefulness, accuracy, and navigation. Expand only after the pilot meets acceptance criteria.
+# 6. Image Preparation
 
-## 13. MVP acceptance criteria
+Before novel-view generation, input images should be normalized.
 
-- Garage Intelligence opens with a working sidebar and 3D Listings feature.
-- An authorized user can search for a listing and load its available 3D representation.
-- Rotation, zoom, pan, reset, and preset views work without losing the vehicle.
-- Tags stay attached while the camera moves and open the correct listing evidence.
-- Edited tags persist and remain bound to the correct asset version.
-- Generated and illustrative representations are clearly distinguishable.
-- Missing specifications are shown as unavailable rather than invented.
-- Failed generation can be retried without losing an existing approved model.
-- Access restrictions apply to assets, tags, and original photos.
-- Pilot assets render responsively on agreed target hardware; measure performance before setting a production budget.
+Existing source photographs may be extremely large, so the current local Electron resize path should remain.
 
-## 14. Deferred work
+Target:
 
-Automated part tagging, reconstructed cab interiors, moving equipment, dimension measurement, mechanical simulation, offline synchronization, public listing-page embedding, and additional Garage Intelligence tools.
+```text
+maximum dimension ≈ 1600 px
+```
 
-## 15. Open implementation decisions
+Preparation should eventually include:
 
-- Generation provider and acceptable reconstruction quality, cost, and latency.
-- Whether illustrative templates are sufficient for the first internal pilot.
-- Target desktop operating systems and distribution/update mechanism.
-- Worker/storage integrations and authentication flow in the existing repository.
-- Who reviews generated assets and maintains tags.
-- Whether sellers need a guided capture workflow for reliable reconstruction.
+- orientation normalization
+- resizing
+- basic crop normalization
+- removal of obviously unusable images
+- view-label filtering
 
-## References
+The first MVP does not require sophisticated segmentation.
 
-- [Schemata](https://www.schemata.com/) — interaction inspiration; no assumption that it exposes a suitable generation API.
-- [NHTSA vPIC API](https://vpic.nhtsa.dot.gov/api/) — optional VIN-derived specification enrichment.
+---
 
-This plan defines proposed work. No repository integration, provider benchmark, or reconstruction quality claim has been verified by implementation yet.
+# 7. View Angle Assignment
+
+Existing view labels should be mapped to approximate azimuths around the vehicle.
+
+Example mapping:
+
+```text
+front        =   0°
+front-left   =  45°
+left         =  90°
+rear-left    = 135°
+rear         = 180°
+rear-right   = 225°
+right        = 270°
+front-right  = 315°
+```
+
+Garage's current labels may not explicitly distinguish left and right in every case.
+
+For the MVP, approximate assignments are acceptable.
+
+These assignments are primarily used to:
+
+1. order the real photographs around the vehicle
+2. determine which intermediate angles are missing
+3. construct approximate camera poses
+
+---
+
+# 8. Novel View Generation
+
+Novel-view generation means generating an image of the same vehicle from a camera angle that was never photographed.
+
+Example:
+
+```text
+0°      real
+15°     generated
+30°     generated
+45°     real
+60°     generated
+75°     generated
+90°     real
+```
+
+For the initial experiment, generate a complete exterior ring at:
+
+```text
+15° intervals
+```
+
+This gives:
+
+```text
+360 / 15 = 24 views
+```
+
+Example output:
+
+```text
+000.png
+015.png
+030.png
+045.png
+060.png
+075.png
+090.png
+105.png
+120.png
+135.png
+150.png
+165.png
+180.png
+195.png
+210.png
+225.png
+240.png
+255.png
+270.png
+285.png
+300.png
+315.png
+330.png
+345.png
+```
+
+Whenever a real image corresponds closely to a requested angle, prefer the real image.
+
+Synthetic views should only fill missing angles.
+
+---
+
+# 9. Novel View Model Experiment
+
+The MVP should test a small number of approaches rather than prematurely committing to one model.
+
+Candidate approaches include:
+
+- Zero123++
+- SyncDreamer
+- other multi-view diffusion models
+- newer sparse-view image-conditioned models
+- direct sparse-image-to-Gaussian approaches if easy to test
+
+The initial goal is not to select the final production model.
+
+The goal is simply:
+
+> Determine whether a model can generate enough geometrically consistent intermediate views of a fire truck to support a stable 360 reconstruction.
+
+---
+
+# 10. Important Constraint: Consistency
+
+The biggest technical challenge is not image quality.
+
+It is **cross-view consistency**.
+
+The generated vehicle must not significantly change between adjacent angles.
+
+Examples of failures:
+
+```text
+30°
+10 wheel lugs
+
+45°
+8 wheel lugs
+```
+
+or:
+
+```text
+60°
+black mirror
+
+75°
+chrome mirror
+```
+
+or:
+
+```text
+90°
+four compartments
+
+105°
+five compartments
+```
+
+Major consistency requirements:
+
+- cab proportions remain stable
+- body length remains stable
+- wheel count remains stable
+- wheel position remains stable
+- mirrors remain stable
+- major compartments remain stable
+- pump-panel placement remains stable
+- ladder structure remains stable
+- paint and major striping remain stable
+
+Small errors in lettering are acceptable for the MVP.
+
+Large geometry changes are not.
+
+---
+
+# 11. Camera Pose Generation
+
+For generated views, Garage already knows the requested camera angle.
+
+Therefore, the novel-view pipeline should **not require COLMAP to rediscover the full camera orbit**.
+
+Instead, Garage should construct camera poses mathematically.
+
+For each azimuth `θ`:
+
+```text
+x = radius * sin(θ)
+z = radius * cos(θ)
+y = cameraHeight
+```
+
+Each camera points toward the estimated vehicle center.
+
+Conceptually:
+
+```text
+                   0°
+                   ●
+                   |
+                   |
+          270° ● --🚒-- ● 90°
+                   |
+                   |
+                   ●
+                  180°
+```
+
+All synthetic views should use approximately:
+
+- the same camera radius
+- the same focal length
+- the same camera height
+- the same target point
+
+The resulting poses should be exported in Nerfstudio-compatible format.
+
+Example:
+
+```text
+transforms.json
+```
+
+This removes one of the largest failure points in the existing sparse-photo pipeline.
+
+---
+
+# 12. Splat Reconstruction
+
+The existing Modal + Nerfstudio pipeline should be reused.
+
+Current stack:
+
+```text
+Modal
+Nerfstudio 1.1.5
+Splatfacto
+A10G / H100
+Spark viewer
+```
+
+New mode:
+
+```text
+generated images
++
+known transforms.json
+        ↓
+Nerfstudio
+        ↓
+Splatfacto
+        ↓
+PLY / SPZ
+```
+
+The sparse synthetic pipeline should skip traditional feature matching whenever explicit camera poses are available.
+
+Conceptually:
+
+```text
+ns-train splatfacto
+    --data posed-dataset
+```
+
+The exact CLI / dataset adapter can be implemented based on the existing Nerfstudio pipeline.
+
+---
+
+# 13. Continuous Capture Pipeline
+
+The existing real-capture pipeline remains valid.
+
+This is the preferred high-fidelity path.
+
+Input:
+
+```text
+2–3 minute walkaround video
+```
+
+or:
+
+```text
+80–150 overlapping photographs
+```
+
+Pipeline:
+
+```text
+walkaround capture
+        ↓
+frame extraction
+        ↓
+COLMAP / hloc
+        ↓
+alignment gate
+        ↓
+Splatfacto
+        ↓
+PLY / SPZ
+```
+
+Current results already prove this pipeline works with a proper capture sequence.
+
+The Tanks & Temples truck reconstruction validated:
+
+- Nerfstudio training
+- Modal execution
+- Splatfacto export
+- Spark rendering
+- free orbit in Garage Intelligence
+
+The remaining test is a properly captured real Garage vehicle.
+
+---
+
+# 14. Representation Types
+
+The MVP should simplify asset representations.
+
+Instead of supporting separate product concepts for:
+
+```text
+Mesh
+Splat
+```
+
+the user-facing product should primarily expose:
+
+```text
+360 Representation
+```
+
+Internally, versions can retain provenance.
+
+Recommended pipeline values:
+
+```text
+novel-view-splat
+capture-splat
+```
+
+Meaning:
+
+### `novel-view-splat`
+
+Created from existing sparse listing photographs.
+
+Some viewpoints were synthesized by AI.
+
+### `capture-splat`
+
+Created from a continuous photographic walkaround.
+
+The geometry is reconstructed primarily from real observations.
+
+The existing `Listing3DAsset` name can remain internally for now to avoid unnecessary refactoring.
+
+---
+
+# 15. Versioning
+
+Generation should continue to be versioned.
+
+Never overwrite previous results.
+
+Example:
+
+```text
+Listing
+│
+├── Version 1
+│   novel-view-splat
+│   rejected
+│
+├── Version 2
+│   novel-view-splat
+│   approved
+│
+└── Version 3
+    capture-splat
+    approved
+```
+
+The currently approved version loads by default.
+
+Experimental or rejected versions remain available only in editor mode.
+
+---
+
+# 16. Dashboard Generation Status
+
+The dashboard should include a compact generation-progress section.
+
+Example:
+
+```text
+┌────────────────────────────────────────────┐
+│ 360 Generation                             │
+│                                            │
+│ 2018 Pierce Dash CF Pumper                 │
+│                                            │
+│ Generating intermediate views              │
+│ ██████████████░░░░░░  16 / 24              │
+│                                            │
+│ Next: Gaussian reconstruction              │
+└────────────────────────────────────────────┘
+```
+
+Multiple active jobs can appear as cards.
+
+Example:
+
+```text
+Active Generations
+
+┌────────────────────────────────────────────┐
+│ Pierce Velocity Pumper                     │
+│ Generating intermediate views              │
+│ ████████████░░░░░░ 16 / 24                 │
+└────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────┐
+│ E-One Cyclone Quint                        │
+│ Reconstructing                             │
+│ ███████████████░░░ 10,850 / 15,000         │
+└────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────┐
+│ Horton Type I Ambulance                    │
+│ ✓ Ready for Review                         │
+│ [View Result]                              │
+└────────────────────────────────────────────┘
+```
+
+---
+
+# 17. Generation State Model
+
+Progress should be based on real pipeline stages, not estimated timers.
+
+Recommended stages:
+
+```ts
+type GenerationStage =
+  | "queued"
+  | "preparing"
+  | "generating_views"
+  | "building_cameras"
+  | "reconstructing"
+  | "exporting"
+  | "ready"
+  | "failed";
+```
+
+Possible UI labels:
+
+```text
+queued
+→ Waiting
+
+preparing
+→ Preparing listing
+
+generating_views
+→ Generating intermediate views
+
+building_cameras
+→ Building camera poses
+
+reconstructing
+→ Reconstructing 360 view
+
+exporting
+→ Exporting result
+
+ready
+→ Ready for review
+
+failed
+→ Generation failed
+```
+
+---
+
+# 18. Progress Data
+
+Each stage should expose meaningful progress when possible.
+
+Example:
+
+```ts
+type GenerationProgress = {
+  stage: GenerationStage;
+
+  current?: number;
+  total?: number;
+
+  message?: string;
+};
+```
+
+Examples:
+
+```json
+{
+  "stage": "generating_views",
+  "current": 16,
+  "total": 24
+}
+```
+
+```json
+{
+  "stage": "reconstructing",
+  "current": 10850,
+  "total": 15000
+}
+```
+
+```json
+{
+  "stage": "exporting",
+  "message": "Converting splat to SPZ"
+}
+```
+
+The dashboard progress bar should only show numeric progress when a meaningful numerator and denominator exist.
+
+---
+
+# 19. Dashboard Card Behavior
+
+Each generation card should display:
+
+- listing title
+- listing number if useful
+- current stage
+- progress
+- pipeline type
+- final state
+- action when completed
+
+Example completed state:
+
+```text
+┌────────────────────────────────────────────┐
+│ 2018 Pierce Dash CF Pumper                 │
+│ Novel View Splat                           │
+│                                            │
+│ ✓ Ready for Review                         │
+│                                            │
+│ [View Result]                              │
+└────────────────────────────────────────────┘
+```
+
+Failure:
+
+```text
+┌────────────────────────────────────────────┐
+│ 2007 Pierce Dash Pumper                    │
+│                                            │
+│ Generation failed                          │
+│ Novel views became inconsistent            │
+│                                            │
+│ [Retry]                                    │
+└────────────────────────────────────────────┘
+```
+
+---
+
+# 20. Generation Detail View
+
+Clicking a progress card should eventually expose more detail.
+
+For MVP, this can be minimal.
+
+Example:
+
+```text
+Generating 360 Representation
+
+✓ Preparing photos
+
+✓ Detecting exterior views
+
+✓ Generating views
+  24 / 24
+
+✓ Building camera poses
+
+● Reconstructing
+  10,850 / 15,000 iterations
+
+○ Exporting
+
+○ Ready for review
+```
+
+This does not need to become a full job-management system.
+
+It only needs to make development and generation status understandable.
+
+---
+
+# 21. Existing Viewer Features to Keep
+
+The current viewer work remains useful and should not be rewritten.
+
+Keep:
+
+- orbit
+- zoom
+- pan
+- Front / Rear / Left / Right presets
+- Reset
+- Versions tab
+- approve / reject
+- inspection panel
+- listing specs
+- real listing photographs
+- angle-matched real photo panel
+- tag placement
+- tag evidence links
+- saved tag camera pose
+- template tag seeding
+- occlusion fading
+
+The new pipeline changes how the primary visual asset is created.
+
+It does not require rebuilding the viewer.
+
+---
+
+# 22. Tags
+
+Tags remain bound to an individual generated version.
+
+Example:
+
+```text
+Listing
+   ↓
+360 Asset Version
+   ↓
+Tags
+```
+
+Tags should continue to reference real evidence:
+
+```text
+tag
+├── position in splat/model space
+├── label
+├── description
+├── category
+├── linked real photos
+└── linked listing attributes
+```
+
+Generated imagery should never be treated as evidence for a tag.
+
+The evidence remains:
+
+- original Garage photographs
+- listing specs
+
+---
+
+# 23. MVP Experiment Dataset
+
+Do not immediately run this across the full inventory.
+
+Start with **one listing** with the best available exterior coverage.
+
+Ideal first test:
+
+```text
+6–10 exterior photos
+good lighting
+little obstruction
+clear front
+clear side
+clear rear
+consistent vehicle configuration
+```
+
+Prefer a conventional pumper before testing:
+
+- aerials
+- quints
+- unusually long rescue vehicles
+
+because those geometries introduce additional complexity.
+
+---
+
+# 24. First Experiment
+
+The first end-to-end experiment should be:
+
+```text
+1 Garage listing
+        ↓
+collect exterior photos
+        ↓
+normalize images
+        ↓
+assign approximate azimuth
+        ↓
+generate 24 views
+        ↓
+generate camera poses
+        ↓
+train Splatfacto
+        ↓
+export PLY / SPZ
+        ↓
+load in Electron viewer
+        ↓
+compare with original photographs
+```
+
+Do this manually where necessary.
+
+Do not build generalized infrastructure before proving the visual result.
+
+---
+
+# 25. MVP Success Criteria
+
+The experiment succeeds if the resulting 360 representation provides noticeably more spatial understanding than the normal photo gallery.
+
+## Geometry
+
+The following should remain stable during rotation:
+
+- cab shape
+- vehicle length
+- wheel placement
+- major compartment placement
+- module / body structure
+- ladder placement when applicable
+
+## Appearance
+
+The following should remain reasonably consistent:
+
+- primary paint
+- major stripes
+- body color divisions
+- major equipment
+- pump-panel region
+- compartment boundaries
+
+## Orbit Stability
+
+The user should not see major:
+
+- duplicated wheels
+- disappearing wheels
+- teleporting compartments
+- body morphing
+- moving mirrors
+- cab size changes
+- vehicle-length changes
+- floating geometry
+
+## Product Usefulness
+
+A user looking at the generated representation should gain a better understanding of:
+
+```text
+front
+rear
+driver side
+passenger side
+major equipment locations
+overall vehicle proportions
+```
+
+than they would from manually clicking through the listing gallery.
+
+---
+
+# 26. Acceptable MVP Errors
+
+The MVP does **not** require perfect reconstruction.
+
+Acceptable errors include:
+
+- unreadable generated text
+- slightly incorrect small decals
+- minor reflective differences
+- imperfect lighting
+- small texture seams
+- approximate details on surfaces that were never photographed
+
+These areas remain backed by the original listing photographs.
+
+---
+
+# 27. Failure Criteria
+
+The sparse-photo experiment should be stopped if repeated tests show:
+
+- significant geometry morphing
+- inconsistent compartment layouts
+- duplicated wheels
+- severe splat fragmentation
+- unstable cab geometry
+- generated views that contradict real photographs
+- no meaningful visual improvement over the normal photo gallery
+- unreasonable GPU cost relative to the result
+
+The team should avoid endlessly tuning the reconstruction pipeline if the missing information simply cannot be inferred reliably.
+
+---
+
+# 28. Fallback Strategy
+
+If sparse novel-view reconstruction fails, the product still has a valid path:
+
+```text
+Normal listing
+        ↓
+real-photo browsing
+        +
+angle-matched inspection interface
+```
+
+and:
+
+```text
+Premium / captured listing
+        ↓
+walkaround video
+        ↓
+capture-splat
+        ↓
+full 360 experience
+```
+
+The MVP experiment determines whether the sparse-photo 360 tier can exist between these two.
+
+---
+
+# 29. Local Experiment Structure
+
+Add a dedicated development directory:
+
+```text
+experiments/
+    novel-view/
+```
+
+Each listing experiment should produce:
+
+```text
+experiments/
+└── <listing-id>/
+    ├── real/
+    ├── normalized/
+    ├── generated/
+    ├── poses/
+    ├── output/
+    └── manifest.json
+```
+
+Example:
+
+```text
+real/
+    front.jpg
+    front-left.jpg
+    side.jpg
+    rear-left.jpg
+    rear.jpg
+
+generated/
+    000.png
+    015.png
+    030.png
+    ...
+    345.png
+
+poses/
+    transforms.json
+
+output/
+    splat.ply
+```
+
+---
+
+# 30. Manifest
+
+Each experiment should record its inputs and provenance.
+
+Example:
+
+```json
+{
+  "listingId": "example-id",
+
+  "views": [
+    {
+      "azimuth": 0,
+      "file": "000.png",
+      "source": "real",
+      "sourceImage": "front.jpg"
+    },
+    {
+      "azimuth": 15,
+      "file": "015.png",
+      "source": "generated",
+      "conditionedOn": [
+        "front.jpg",
+        "front-left.jpg"
+      ]
+    }
+  ]
+}
+```
+
+This will make debugging much easier when a generated viewpoint causes reconstruction problems.
+
+---
+
+# 31. Development Commands
+
+Useful experimental commands could be added.
+
+Example:
+
+```bash
+GI_NOVEL_PREP=<listingId>
+```
+
+Creates:
+
+```text
+real/
+normalized/
+manifest.json
+```
+
+Then:
+
+```bash
+GI_NOVEL_GENERATE=<listingId>
+```
+
+Creates the intermediate viewpoints.
+
+Then:
+
+```bash
+GI_NOVEL_SPLAT=<listingId>
+```
+
+Generates poses and launches reconstruction.
+
+Eventually:
+
+```bash
+GI_GENERATE=<listingId>
+```
+
+can orchestrate the entire pipeline.
+
+For the first experiment, however, keeping these phases separate will make debugging easier.
+
+---
+
+# 32. Generation Pipeline Architecture
+
+Long-running work should not depend on the Electron window remaining open.
+
+The architecture should remain:
+
+```text
+Electron
+   ↓
+start generation
+   ↓
+remote/background job
+   ↓
+persist status
+   ↓
+Electron polls or refreshes status
+```
+
+The dashboard card reads that status.
+
+The actual reconstruction job continues independently.
+
+The exact production job system is not an MVP concern.
+
+The existing Modal detached execution approach is sufficient.
+
+---
+
+# 33. Modal Pipeline
+
+Reuse:
+
+```text
+pipeline/splat_modal.py
+```
+
+Add support for two input modes:
+
+```text
+capture
+```
+
+and:
+
+```text
+posed-images
+```
+
+### Capture mode
+
+```text
+images/video
+    ↓
+COLMAP / hloc
+    ↓
+Splatfacto
+```
+
+### Posed-images mode
+
+```text
+images
++
+transforms.json
+    ↓
+Splatfacto
+```
+
+This keeps both reconstruction paths in one pipeline.
+
+---
+
+# 34. Alignment Gate
+
+The existing alignment gate remains useful for real capture.
+
+Example:
+
+```text
+aligned frames < 15
+    ↓
+STOP
+```
+
+However, this gate should not apply in the same way to explicitly posed synthetic images.
+
+For `posed-images`, validation should instead check:
+
+- all expected frames exist
+- transforms exist
+- matrices are valid
+- image dimensions are consistent
+- camera ordering is valid
+- no obviously corrupt images exist
+
+---
+
+# 35. Viewer Asset Format
+
+Continue using formats supported by Spark:
+
+```text
+.ply
+.spz
+.splat
+```
+
+Prefer the smallest practical production representation after the visual pipeline works.
+
+Optimization is not part of the first experiment.
+
+A large `.ply` is acceptable for MVP testing.
+
+---
+
+# 36. Dashboard Scope
+
+The dashboard does not need to become an analytics page.
+
+Its immediate purpose is:
+
+> Show what Garage Intelligence is currently generating and whether something is ready for review.
+
+Minimum sections:
+
+```text
+Garage Intelligence
+
+Active Generations
+
+Ready for Review
+
+Recent Listings
+```
+
+This is enough for the MVP.
+
+---
+
+# 37. Recommended Dashboard Layout
+
+Example:
+
+```text
+┌────────────────────────────────────────────────────┐
+│ Garage Intelligence                                │
+│                                                    │
+│ Active Generations                                 │
+│                                                    │
+│ ┌───────────────────────────────────────────────┐  │
+│ │ 2018 Pierce Dash CF Pumper                    │  │
+│ │ Generating intermediate views                 │  │
+│ │ █████████████░░░░░ 16 / 24                    │  │
+│ └───────────────────────────────────────────────┘  │
+│                                                    │
+│ ┌───────────────────────────────────────────────┐  │
+│ │ 2007 Pierce Velocity                          │  │
+│ │ Reconstructing                                │  │
+│ │ ███████████████░░ 11,204 / 15,000             │  │
+│ └───────────────────────────────────────────────┘  │
+│                                                    │
+│ Ready for Review                                   │
+│                                                    │
+│ ┌───────────────────────────────────────────────┐  │
+│ │ Horton Type I Ambulance                       │  │
+│ │ ✓ 360 generated                               │  │
+│ │                              [View Result]    │  │
+│ └───────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────┘
+```
+
+---
+
+# 38. What Is Removed From MVP
+
+The following should be removed from the main MVP plan:
+
+- Meshy integration as the primary generation pipeline
+- polygon mesh generation
+- Meshy credits / tier selection
+- mesh-specific transform behavior
+- mesh-vs-splat product terminology
+- open-source mesh generators such as Hunyuan3D or TRELLIS
+- maintaining two parallel generation products
+
+Old architecture:
+
+```text
+listing
+├── generated mesh
+└── photo-real splat
+```
+
+New architecture:
+
+```text
+listing
+└── 360 representation
+    ├── novel-view-splat
+    └── capture-splat
+```
+
+This reduces the MVP surface considerably.
+
+---
+
+# 39. What Is Deferred
+
+Do not prioritize:
+
+- Clerk API-key integration
+- Supabase production bucket
+- Garage monorepo PR
+- public listing embedding
+- seller capture app
+- automatic tag suggestion
+- AI tag placement
+- splat proxy meshes
+- advanced occlusion logic
+- Windows packaging
+- code signing
+- auto-update
+- audit system
+- role system
+- production queue architecture
+- model replacement strategy
+- splat cropping
+- compression optimization
+
+until the sparse-photo visual experiment has been evaluated.
+
+---
+
+# 40. Immediate Implementation Order
+
+## Phase 1 — Simplify UI
+
+Remove generated-mesh-specific UI concepts.
+
+Keep:
+
+```text
+360 View
+Photos
+Versions
+Tags
+```
+
+Add:
+
+```text
+Generation Status Cards
+```
+
+---
+
+## Phase 2 — Dataset Preparation
+
+Build:
+
+```bash
+GI_NOVEL_PREP=<listingId>
+```
+
+Responsibilities:
+
+- query listing
+- select exterior images
+- resize images
+- map view labels to approximate angles
+- write manifest
+- save normalized inputs
+
+---
+
+## Phase 3 — Novel View Prototype
+
+Pick one model.
+
+Generate:
+
+```text
+24-view orbit
+```
+
+Do not initially automate model selection.
+
+Inspect the images manually before reconstruction.
+
+This step answers the most important question:
+
+> Are adjacent generated views consistent enough?
+
+---
+
+## Phase 4 — Pose Generator
+
+Create:
+
+```text
+generateTransforms.ts
+```
+
+or equivalent.
+
+Input:
+
+```text
+24 azimuths
+camera radius
+camera height
+focal parameters
+```
+
+Output:
+
+```text
+transforms.json
+```
+
+---
+
+## Phase 5 — Posed Nerfstudio Pipeline
+
+Extend Modal pipeline to accept:
+
+```text
+images/
+transforms.json
+```
+
+without running COLMAP.
+
+Train:
+
+```text
+Splatfacto
+15k iterations
+```
+
+Export:
+
+```text
+PLY
+```
+
+---
+
+## Phase 6 — Viewer Integration
+
+Import the splat into the existing viewer.
+
+Verify:
+
+- orientation
+- scale
+- controls
+- Front / Rear / Left / Right
+- real-photo matching
+- tags
+
+---
+
+## Phase 7 — Dashboard Progress
+
+Add pipeline status to the dashboard.
+
+During experiment mode this can use local state / JSON.
+
+Example:
+
+```json
+{
+  "listingId": "123",
+  "stage": "generating_views",
+  "current": 16,
+  "total": 24
+}
+```
+
+No backend persistence is required initially.
+
+---
+
+## Phase 8 — Evaluation
+
+Compare:
+
+```text
+generated 360
+vs.
+original listing gallery
+```
+
+Evaluate:
+
+- geometry stability
+- appearance stability
+- spatial usefulness
+- obvious hallucinations
+- viewer experience
+- runtime
+- GPU cost
+
+Record the result.
+
+---
+
+# 41. MVP Decision Gate
+
+After one or several representative vehicles:
+
+## Continue sparse-photo 360 if:
+
+- generated views remain reasonably consistent
+- splat remains coherent
+- the orbit is visually useful
+- geometry is substantially stable
+- the result provides meaningful spatial information
+- inference cost is acceptable
+
+Then:
+
+```text
+prototype
+→ automate
+→ test across vehicle categories
+→ integrate backend
+→ public product experiment
+```
+
+## Stop if:
+
+- hallucinated geometry dominates
+- trucks noticeably morph during orbit
+- splats remain fragmented
+- generated intermediate views contradict the real photos
+- the result does not meaningfully improve understanding
+
+Then the product strategy becomes:
+
+```text
+existing listing
+→ enhanced real-photo viewer
+
+walkaround capture
+→ full photo-real 360
+```
+
+without a sparse-photo generated 360 tier.
+
+---
+
+# 42. Final MVP Architecture
+
+```text
+                    GARAGE LISTING
+                          │
+                    Exterior Photos
+                          │
+                          ▼
+                  Image Preparation
+                          │
+                          ▼
+                    View Mapping
+                          │
+                          ▼
+                Novel View Generation
+                          │
+                 24-View Image Ring
+                          │
+                          ▼
+                Deterministic Cameras
+                          │
+                          ▼
+                     Splatfacto
+                          │
+                          ▼
+                      PLY / SPZ
+                          │
+                          ▼
+              Garage Intelligence Viewer
+                          │
+         ┌────────────────┴────────────────┐
+         │                                 │
+     360 Orbit                       Real Photos
+         │                                 │
+   Spatial Context                    Ground Truth
+         │
+         └────────────────┬────────────────┘
+                          │
+                    Inspection Tags
+```
+
+For listings with a real walkaround:
+
+```text
+Walkaround Video
+       │
+       ▼
+Frame Extraction
+       │
+       ▼
+COLMAP / hloc
+       │
+       ▼
+Splatfacto
+       │
+       ▼
+Same Viewer
+```
+
+---
+
+# 43. Final MVP Definition
+
+Garage Intelligence MVP is:
+
+> A desktop tool that takes the exterior photos already attached to a Garage vehicle listing, attempts to generate consistent missing viewpoints, reconstructs them into an interactive Gaussian-splat 360 representation, shows generation progress in the dashboard, and keeps the original listing photographs available as ground-truth inspection evidence.
+
+The MVP is successful when Garage can take **one real sparse listing** and produce a 360 representation that provides meaningfully better spatial understanding than the original gallery.
+
+Everything else comes after that works.

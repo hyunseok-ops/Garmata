@@ -63,12 +63,36 @@ export type Listing3DTag = {
   evidence: { imageIds: string[]; fields: string[] };
 };
 
+// docs/PLAN.md §17-§18: progress is driven by real pipeline stages, never timers.
+export type GenerationStage = "queued" | "preparing" | "generating_views" | "building_cameras" | "reconstructing" | "exporting" | "ready" | "failed";
+// novel-view-splat: sparse listing photos + AI-filled angles. capture-splat: continuous walkaround.
+// posed-test: ring rendered from an existing model, used only to verify cameras/reconstruction/viewer end to end.
+export type SplatPipeline = "novel-view-splat" | "capture-splat" | "posed-test";
+
+export type Generation = {
+  id: string;
+  listingId: string;
+  title: string;
+  secondaryId?: number;
+  pipeline: SplatPipeline;
+  stage: GenerationStage;
+  current?: number;
+  total?: number;
+  message?: string;
+  error?: string;
+  assetId?: string; // set when ready
+  calls: { views?: string; splat?: string }; // Modal call ids, so polling resumes after a restart
+  done: { prep?: boolean; views?: boolean; cameras?: boolean; splat?: boolean };
+  paused?: boolean; // GI_NOVEL_GENERATE stops after views for manual inspection; GI_NOVEL_SPLAT continues it
+  startedAt: string;
+  updatedAt: string;
+};
+
 export interface ListingsApi {
   searchListings(query: string): Promise<ListingSummary[]>;
   getListing(id: string): Promise<ListingDetail>;
   getCurrentAsset(listingId: string): Promise<Listing3DAsset | null>;
   listAssets(listingId: string): Promise<Listing3DAsset[]>; // every version, newest first
-  requestGeneration(listingId: string): Promise<Listing3DAsset>;
   listTags(assetVersionId: string): Promise<Listing3DTag[]>;
   saveTags(assetVersionId: string, tags: Listing3DTag[]): Promise<void>;
 }

@@ -1,6 +1,6 @@
 import { Component, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
-import { ContactShadows, Environment, Html, OrbitControls, useGLTF } from "@react-three/drei";
+import { Bvh, ContactShadows, Environment, Html, OrbitControls, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
 import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
 import type { OrbitControls as OrbitControlsImpl } from "three-stdlib";
@@ -108,16 +108,24 @@ function CameraRig({ pose, controls }: { pose: Pose | null; controls: React.RefO
 }
 
 // Own occlusion test: drei's `occlude` has no tolerance, so tags placed on a surface read as hidden.
+// Occlusion is a visual hint, not per-frame critical: re-test at most ~8x/s and only after the camera moved.
+// Raycasts go through the model's BVH (<Bvh> below), so each test is cheap even on 500k-triangle meshes.
+const OCCLUSION_INTERVAL_MS = 120;
 function TagMarker({ tag, selected, onSelect, model }: { tag: Listing3DTag; selected: boolean; onSelect: () => void; model: React.RefObject<THREE.Group | null> }) {
   const [hidden, setHidden] = useState(false);
   const { camera } = useThree();
-  const ray = useRef(new THREE.Raycaster());
+  const st = useRef({ ray: new THREE.Raycaster(), p: new THREE.Vector3(), lastCam: new THREE.Vector3(Infinity, 0, 0), lastAt: 0 });
   useFrame(() => {
-    if (!model.current) return;
-    const p = model.current.localToWorld(new THREE.Vector3(...tag.position));
+    const s = st.current;
+    const now = performance.now();
+    if (!model.current || now - s.lastAt < OCCLUSION_INTERVAL_MS || camera.position.distanceToSquared(s.lastCam) < 1e-6) return;
+    s.lastAt = now;
+    s.lastCam.copy(camera.position);
+    const p = model.current.localToWorld(s.p.set(...tag.position));
     const dist = p.distanceTo(camera.position);
-    ray.current.set(camera.position, p.sub(camera.position).normalize());
-    const hit = ray.current.intersectObject(model.current, true)[0];
+    s.ray.firstHitOnly = true;
+    s.ray.set(camera.position, p.sub(camera.position).normalize());
+    const hit = s.ray.intersectObject(model.current, true)[0];
     const h = !!hit && hit.distance < dist - 0.15;
     if (h !== hidden) setHidden(h);
   });
@@ -177,18 +185,21 @@ export default function Viewer(props: {
   };
 
   const renderable = props.asset.format === "procedural" || props.asset.storageKey;
+  const isSplat = props.asset.format === "splat";
 
   return (
-    <Canvas shadows dpr={[1, 2]} gl={{ toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05 }} camera={{ position: PRESETS.Reset.position, fov: 45 }} onPointerMissed={() => props.onSelectTag(null)} style={{ cursor: props.placing ? "crosshair" : "grab" }}>
+    // Splats: no shadow maps, and a 1.5x pixel-ratio cap (splat cost scales with pixels x splats).
+    <Canvas shadows={!isSplat} dpr={isSplat ? [1, 1.5] : [1, 2]} gl={{ toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 1.05, powerPreference: "high-performance" }} camera={{ position: PRESETS.Reset.position, fov: 45 }} onPointerMissed={() => props.onSelectTag(null)} style={{ cursor: props.placing ? "crosshair" : "grab" }}>
       <color attach="background" args={["#15161a"]} />
       <Suspense fallback={<hemisphereLight intensity={1} groundColor="#222" />}>
         <Environment preset="city" environmentIntensity={0.9} />
       </Suspense>
-      <directionalLight position={[10, 12, 6]} intensity={1.2} castShadow shadow-mapSize={2048} />
+      <directionalLight position={[10, 12, 6]} intensity={1.2} castShadow={!isSplat} shadow-mapSize={2048} />
       {/* Splats carry their own photographed ground and surroundings; synthetic floor cues only fight them. */}
-      {props.asset.format !== "splat" && <gridHelper args={[40, 40, "#2c2e35", "#22242a"]} position={[0, 0.001, 0]} />}
-      {props.asset.format !== "splat" && <ContactShadows position={[0, 0, 0]} opacity={0.6} scale={30} blur={2.2} far={6} />}
+      {!isSplat && <gridHelper args={[40, 40, "#2c2e35", "#22242a"]} position={[0, 0.001, 0]} />}
+      {!isSplat && <ContactShadows frames={1} position={[0, 0, 0]} opacity={0.6} scale={30} blur={2.2} far={6} /> /* static model: bake once, not every frame */}
 
+      <Bvh firstHitOnly>
       <group ref={model} onClick={onModelClick}>
         {renderable ? (
           <ErrorBoundary fallback={<Html center><div className="viewport-state">Unsupported or corrupt asset. Original photos remain available.</div></Html>}>
@@ -200,6 +211,7 @@ export default function Viewer(props: {
           <Html center><div className="viewport-state">No renderable asset for this version.</div></Html>
         )}
       </group>
+      </Bvh>
 
       {props.tags.map((t) => (
         <TagMarker key={t.id} tag={t} model={model} selected={t.id === props.selectedTagId} onSelect={() => props.onSelectTag(t.id)} />

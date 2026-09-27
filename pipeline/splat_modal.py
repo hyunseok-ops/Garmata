@@ -1,4 +1,10 @@
-"""Gaussian-splat reconstruction on Modal with Nerfstudio Splatfacto (docs/PLAN-SPLAT.md, Phase 1).
+"""Gaussian-splat reconstruction on Modal with Nerfstudio Splatfacto (docs/PLAN.md §12, §13, §33).
+
+Two input modes:
+  capture       images/video -> COLMAP/hloc -> alignment gate -> Splatfacto
+  posed-images  images + transforms.json (known cameras) -> validation -> Splatfacto, no feature matching
+
+Progress is published to the `gi-progress` modal.Dict under `progress_key` so the desktop dashboard can poll it.
 
 Manual pilot usage:
   uvx modal run pipeline/splat_modal.py --job velocity-226894 --urls urls.json          # images from URLs
@@ -10,6 +16,7 @@ Inputs and outputs live on the `gi-splats` Volume; nothing is baked into the ima
 """
 import json
 import pathlib
+import re
 import subprocess
 import time
 
@@ -27,34 +34,101 @@ image = (
 )
 app = modal.App("garage-intelligence-splat", image=image)
 vol = modal.Volume.from_name("gi-splats", create_if_missing=True)
+progress = modal.Dict.from_name("gi-progress", create_if_missing=True)
 DATA = pathlib.Path("/data")
 
 
 LOG_DIR: pathlib.Path | None = None
+PROGRESS_KEY = ""
 
 
-def sh(cmd: list[str], cwd: pathlib.Path | None = None) -> None:
-    """Run a step; tee its output to <job>/logs/<tool>.log on the volume so failures survive Modal's short log window."""
+def report(stage: str, current: int | None = None, total: int | None = None, message: str | None = None) -> None:
+    if PROGRESS_KEY:
+        progress[PROGRESS_KEY] = json.dumps({"stage": stage, "current": current, "total": total, "message": message, "at": time.time()})
+
+
+STEP_RE = re.compile(r"^\s*(\d+) \(\s*[\d.]+%\)")
+
+
+def sh(cmd: list[str], cwd: pathlib.Path | None = None, on_line=None) -> None:
+    """Run a step, streaming output (for progress) and teeing it to <job>/logs/<tool>.log on the volume."""
     print("$", " ".join(cmd), flush=True)
-    log = (LOG_DIR / f"{cmd[0]}.log") if LOG_DIR else None
-    proc = subprocess.run(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    if log:
-        log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(proc.stdout)
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines: list[str] = []
+    for line in proc.stdout:  # type: ignore[union-attr]
+        lines.append(line)
+        if on_line:
+            on_line(line)
+    proc.wait()
+    out = "".join(lines)
+    if LOG_DIR:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        (LOG_DIR / f"{cmd[0]}.log").write_text(out)
         vol.commit()
-    print(proc.stdout[-4000:], flush=True)
+    print(out[-4000:], flush=True)
     if proc.returncode:
-        raise RuntimeError(f"{cmd[0]} failed ({proc.returncode}); tail:\n{proc.stdout[-1500:]}")
+        raise RuntimeError(f"{cmd[0]} failed ({proc.returncode}); tail:\n{out[-1500:]}")
+
+
+def image_size(path: pathlib.Path) -> tuple[int, int]:
+    """(w, h) from a PNG/JPEG header; raises on anything else or truncated files. Stdlib only: the function's Python
+    (Modal add_python) is not the image's Python, so packages installed for one are invisible to the other."""
+    import struct
+
+    b = path.read_bytes()
+    if b[:8] == b"\x89PNG\r\n\x1a\n" and b[12:16] == b"IHDR" and b[-8:-4] == b"IEND":
+        return struct.unpack(">II", b[16:24])
+    if b[:2] == b"\xff\xd8" and b[-2:] == b"\xff\xd9":
+        i = 2
+        while i < len(b) - 9:
+            marker, length = b[i + 1], struct.unpack(">H", b[i + 2:i + 4])[0]
+            if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+                h, w = struct.unpack(">HH", b[i + 5:i + 9])
+                return w, h
+            i += 2 + length
+    raise ValueError("not a complete PNG/JPEG")
+
+
+def validate_posed(root: pathlib.Path, expected: int | None) -> list[str]:
+    """Plan §34: posed datasets are validated (frames, matrices, sizes, ordering) instead of alignment-gated."""
+    import math
+
+    t = json.loads((root / "transforms.json").read_text())
+    frames, errors = t["frames"], []
+    if expected is not None and len(frames) != expected:
+        errors.append(f"expected {expected} frames, found {len(frames)}")
+    sizes = set()
+    for i, f in enumerate(frames):
+        path = root / (f.get("file_path") or "")
+        if not f.get("file_path") or not path.is_file():
+            errors.append(f"frame {i} image missing: {f.get('file_path')}")
+            continue
+        try:
+            sizes.add(image_size(path))
+        except Exception as e:
+            errors.append(f"frame {i} image corrupt: {e}")
+        m = f.get("transform_matrix")
+        if not (isinstance(m, list) and len(m) == 4 and all(len(r) == 4 and all(math.isfinite(v) for v in r) for r in m)):
+            errors.append(f"frame {i} matrix is not a finite 4x4")
+    if len(sizes) > 1:
+        errors.append(f"inconsistent image sizes: {sorted(sizes)}")
+    if not errors:
+        az = [(math.degrees(math.atan2(f["transform_matrix"][2][3], f["transform_matrix"][0][3])) + 360) % 360 for f in frames]
+        if any(b <= a for a, b in zip(az, az[1:])):
+            errors.append("camera azimuths are not strictly increasing")
+    return errors
 
 
 # ponytail: one function per GPU tier; Modal picks the class at definition time, not per call.
 MIN_FRAMES = 15  # below this a splat is not worth GPU time; report alignment and stop
 
 
-def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations: int, gpu: str, matcher: str = "sift") -> dict:
+def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations: int, gpu: str, matcher: str = "sift",
+                 posed: str = "", progress_key: str = "", expected_frames: int | None = None) -> dict:
     import requests
 
-    global LOG_DIR
+    global LOG_DIR, PROGRESS_KEY
+    PROGRESS_KEY = progress_key
     root = DATA / "jobs" / job
     LOG_DIR = root / "logs"
     images, processed, outputs, export = root / "images", root / "processed", root / "outputs", root / "export"
@@ -62,7 +136,19 @@ def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations
     t0 = time.time()
 
     dataparser: list[str] = []
-    if job.startswith("sample-"):
+    if posed:
+        # Known cameras (synthetic ring or rendered test): no feature matching, no re-orientation, no rescaling, so the
+        # splat comes out in the same world frame the poses were written in.
+        report("building_cameras", message="Validating posed dataset")
+        vol.reload()
+        processed = DATA / posed
+        errors = validate_posed(processed, expected_frames)
+        if errors:
+            report("failed", message="; ".join(errors)[:300])
+            raise RuntimeError("posed dataset invalid: " + "; ".join(errors))
+        dataparser = ["nerfstudio-data", "--orientation-method", "none", "--center-method", "none", "--auto-scale-poses", "False", "--eval-mode", "all"]
+        stats["source"] = f"posed {posed}"
+    elif job.startswith("sample-"):
         # Tanks & Temples walkarounds ("truck", "train") with COLMAP poses, as packaged by the 3DGS authors.
         # Proves the pipeline end to end with the kind of capture a listing walkaround video would give.
         name = job.removeprefix("sample-")
@@ -125,7 +211,7 @@ def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations
     else:
         stats["frames_aligned"] = len(list(next(processed.glob("images*")).glob("*")))
 
-    if stats["frames_aligned"] < MIN_FRAMES:
+    if not posed and stats["frames_aligned"] < MIN_FRAMES:  # alignment gate applies to real captures only (§34)
         stats["outcome"] = f"unsuitable: only {stats['frames_aligned']} frames aligned (< {MIN_FRAMES}); not training"
         (root / "stats.json").write_text(json.dumps(stats, indent=2))
         vol.commit()
@@ -135,28 +221,52 @@ def _reconstruct(job: str, image_urls: list[str] | None, video: bool, iterations
     # Only runs with a checkpoint count; earlier crashed attempts leave config-only folders behind.
     trained = lambda: sorted(c for c in (outputs / job / "splatfacto").glob("*/config.yml") if (c.parent / "nerfstudio_models").exists())  # noqa: E731
     if not trained():
+        report("reconstructing", 0, iterations)
+        last = [0.0]
+
+        def on_train_line(line: str) -> None:
+            m = STEP_RE.match(line)
+            if m and time.time() - last[0] > 5:
+                last[0] = time.time()
+                report("reconstructing", int(m.group(1)), iterations)
+
         sh(["ns-train", "splatfacto", "--data", str(processed), "--output-dir", str(outputs), "--experiment-name", job,
-            "--vis", "tensorboard", "--viewer.quit-on-train-completion", "True", "--max-num-iterations", str(iterations), *dataparser])
+            "--vis", "tensorboard", "--viewer.quit-on-train-completion", "True", "--max-num-iterations", str(iterations), *dataparser],
+           on_line=on_train_line)
         vol.commit()  # keep the checkpoint even if export fails; uncommitted volume writes die with the container
     print("trained runs:", [str(c.parent.name) for c in trained()], flush=True)
     config = trained()[-1]
+    report("exporting", message="Exporting splat")
     sh(["ns-export", "gaussian-splat", "--load-config", str(config), "--output-dir", str(export)])
     vol.commit()
     stats["seconds_train_export"] = round(time.time() - t1)
     stats["ply_bytes"] = (export / "splat.ply").stat().st_size
+    stats["export"] = str((export / "splat.ply").relative_to(DATA))
     (root / "stats.json").write_text(json.dumps(stats, indent=2))
     vol.commit()
+    report("ready", message="Splat exported")
     return stats
 
 
+def _guarded(fn, progress_key: str, *args):
+    try:
+        return fn(*args)
+    except Exception as e:
+        if progress_key:
+            progress[progress_key] = json.dumps({"stage": "failed", "message": str(e)[:300], "at": time.time()})
+        raise
+
+
 @app.function(gpu="A10G", timeout=3 * 3600, volumes={str(DATA): vol})
-def reconstruct(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift") -> dict:
-    return _reconstruct(job, image_urls, video, iterations, "A10G", matcher)
+def reconstruct(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift",
+                posed: str = "", progress_key: str = "", expected_frames: int | None = None) -> dict:
+    return _guarded(_reconstruct, progress_key, job, image_urls, video, iterations, "A10G", matcher, posed, progress_key, expected_frames)
 
 
 @app.function(gpu="H100", timeout=3 * 3600, volumes={str(DATA): vol})
-def reconstruct_fast(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift") -> dict:
-    return _reconstruct(job, image_urls, video, iterations, "H100", matcher)
+def reconstruct_fast(job: str, image_urls: list[str] | None = None, video: bool = False, iterations: int = 15000, matcher: str = "sift",
+                     posed: str = "", progress_key: str = "", expected_frames: int | None = None) -> dict:
+    return _guarded(_reconstruct, progress_key, job, image_urls, video, iterations, "H100", matcher, posed, progress_key, expected_frames)
 
 
 @app.function(gpu="A10G", timeout=600)

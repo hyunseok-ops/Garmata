@@ -126,32 +126,6 @@ export const fixtureApi: ListingsApi = {
   async listAssets(listingId) {
     return assets.filter((a) => a.listingId === listingId).sort((a, b) => b.version - a.version);
   },
-  async requestGeneration(listingId) {
-    const l = listings.find((x) => x.id === listingId)!;
-    const existing = assets.find((a) => a.listingId === listingId);
-    // Retry must not duplicate a live job or overwrite an approved version.
-    if (existing && (existing.processingStatus === "queued" || existing.processingStatus === "processing")) return existing;
-    const version = existing ? existing.version + 1 : 1;
-    const asset: Listing3DAsset = {
-      id: `asset-${l.secondaryId}-v${version}`,
-      listingId,
-      version,
-      representation: "reconstructed",
-      format: "glb",
-      storageKey: null,
-      sourceImageIds: l.photos.map((p) => p.id),
-      sourceFingerprint: l.photos.map((p) => p.id).join("|"),
-      pipelineVersion: "provider-tbd",
-      processingStatus: "queued",
-      reviewStatus: "pending",
-      createdAt: new Date().toISOString(),
-    };
-    if (existing && existing.reviewStatus === "approved") return existing; // keep approved model in the viewer; new job would run in background
-    if (existing) assets.splice(assets.indexOf(existing), 1, asset);
-    else assets.push(asset);
-    l.processingStatus = "queued";
-    return asset;
-  },
   async listTags(assetVersionId) {
     const raw = localStorage.getItem(TAG_KEY(assetVersionId));
     const tags: Listing3DTag[] = raw ? JSON.parse(raw) : seedTags;
