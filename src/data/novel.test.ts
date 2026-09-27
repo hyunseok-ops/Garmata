@@ -66,3 +66,13 @@ test("pinned photos take their slots; labels fill the rest", () => {
   assert.deepEqual(reals, [[0, "f"], [90, "s1"], [135, "s2"], [180, "r"]]); // s2 pinned; s1 is the label pick
   assert.equal(views.find((v) => v.azimuth === 135)?.sourceImage, "real/side-s2.jpg");
 });
+
+test("regenerateReals: 24 target frames plus input-only real frames", () => {
+  const p = (id: string, viewLabel: string) => ({ id, url: id, viewLabel });
+  const views = planRing([p("f", "front"), p("s", "side"), p("r", "rear")]);
+  const t = buildTransforms(views, undefined, true);
+  assert.equal(t.frames.length, 27);
+  assert.deepEqual(t.frames.slice(0, 3).map((f) => [f.azimuth, f.file_path]), [[0, "images/000.png"], [90, "images/090.png"], [180, "images/180.png"]]);
+  assert.ok(t.frames.slice(3).every((f) => f.file_path === null));
+  assert.deepEqual(buildSplit(views, true), { train_ids: [0, 1, 2], test_ids: Array.from({ length: 24 }, (_, i) => i + 3) });
+});

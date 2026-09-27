@@ -55,8 +55,15 @@ export function poseFor(azimuthDeg: number, ring = RING): Mat4 {
 
 export const focalPx = (ring = RING) => ring.w / 2 / Math.tan(((ring.hfovDeg / 2) * Math.PI) / 180);
 
-// Estimated vehicle length in world units: a side photo frames the truck at ~85% of the image width.
-export const estimatedVehicleLength = (ring = RING) => 2 * ring.radius * Math.tan(((ring.hfovDeg / 2) * Math.PI) / 180) * 0.85;
+// Estimated vehicle length in world units. 0.72 of the frame width at the target distance keeps the near side of a
+// side view (which projects wider than the centre line) at ~80% of the image, with margin for the generator.
+export const estimatedVehicleLength = (ring = RING) => 2 * ring.radius * Math.tan(((ring.hfovDeg / 2) * Math.PI) / 180) * 0.72;
+// Assumed vehicle box in world units (fire apparatus is roughly 4:1:1.2 length:width:height), resting on y=0.
+// View normalization scales each real photo so the vehicle fills the frame the way this box projects at its slot.
+export const vehicleBox = (ring = RING) => {
+  const L = estimatedVehicleLength(ring);
+  return { min: [-L / 2, 0, -L * 0.125], max: [L / 2, L * 0.3, L * 0.125] };
+};
 // Viewer normalizes vehicles to ~8 units long.
 export const viewerScale = (ring = RING) => 8 / estimatedVehicleLength(ring);
 
@@ -73,10 +80,17 @@ export type RingView = {
 //   labels: { "front_34": 315 }            move the auto-picked photo for a label
 //   photos: { "<ListingImage.id>": 135 }   pin exact photos to ring slots (e.g. a driver-side shot filed as "side")
 // A plain { label: azimuth } object is read as `labels`.
-export type RingOverrides = { labels?: Record<string, number>; photos?: Record<string, number> };
+// regenerateReals: SEVA re-renders the real slots too, from the exact ring cameras. Real photos stay as conditioning
+// (and as evidence in the viewer) but are not trained on, because their unknown distance/zoom contradicts the ring.
+export type RingOverrides = { labels?: Record<string, number>; photos?: Record<string, number>; regenerateReals?: boolean; ringStepDeg?: number };
 export function normalizeOverrides(o: unknown): RingOverrides {
   const x = (o ?? {}) as Record<string, unknown>;
-  return "labels" in x || "photos" in x ? (x as RingOverrides) : { labels: x as Record<string, number> };
+  return ["labels", "photos", "regenerateReals", "ringStepDeg"].some((k) => k in x) ? (x as RingOverrides) : { labels: x as Record<string, number> };
+}
+
+// Ring for a listing: the default 24-view ring unless the experiment config asks for a different spacing.
+export function ringFor(o: RingOverrides) {
+  return o.ringStepDeg ? { ...RING, stepDeg: o.ringStepDeg } : RING;
 }
 
 const slot = (az: number, ring = RING) => ((Math.round(az / ring.stepDeg) * ring.stepDeg) % 360 + 360) % 360;
@@ -107,16 +121,27 @@ export function planRing(photos: ListingPhoto[], facing: Facing = {}, overrides:
 }
 
 // Nerfstudio / SEVA transforms.json. Generated frames have file_path null until the generator fills them.
-export function buildTransforms(views: RingView[], ring = RING) {
+// With regenerateReals, all 24 ring frames are targets and each real photo is prepended as an input-only frame at its
+// slot's camera; those extra frames condition SEVA and are dropped before reconstruction.
+export function buildTransforms(views: RingView[], ring = RING, regenerateReals = false) {
   const fl = focalPx(ring);
-  return {
-    orientation_override: "none",
-    fl_x: fl, fl_y: fl, cx: ring.w / 2, cy: ring.h / 2, w: ring.w, h: ring.h,
-    frames: views.map((v) => ({ file_path: v.source === "real" ? v.file : null, transform_matrix: poseFor(v.azimuth, ring), azimuth: v.azimuth })),
-  };
+  const ringFrames = views.map((v) => ({
+    file_path: v.source === "real" && !regenerateReals ? v.file : null,
+    transform_matrix: poseFor(v.azimuth, ring),
+    azimuth: v.azimuth,
+  }));
+  const inputFrames = regenerateReals
+    ? views.filter((v) => v.source === "real").map((v) => ({ file_path: v.file, transform_matrix: poseFor(v.azimuth, ring), azimuth: v.azimuth, input_only: true }))
+    : [];
+  // Inputs first: SEVA sizes each empty frame from the previous loaded image, so frame 0 must have an image.
+  return { orientation_override: "none", fl_x: fl, fl_y: fl, cx: ring.w / 2, cy: ring.h / 2, w: ring.w, h: ring.h, vehicle_box: vehicleBox(ring), frames: [...inputFrames, ...ringFrames] };
 }
 
-export function buildSplit(views: RingView[]) {
+export function buildSplit(views: RingView[], regenerateReals = false) {
+  if (regenerateReals) {
+    const reals = views.filter((v) => v.source === "real").length;
+    return { train_ids: Array.from({ length: reals }, (_, i) => i), test_ids: views.map((_, i) => reals + i) };
+  }
   return {
     train_ids: views.flatMap((v, i) => (v.source === "real" ? [i] : [])),
     test_ids: views.flatMap((v, i) => (v.source === "generated" ? [i] : [])),

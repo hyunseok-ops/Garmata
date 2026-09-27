@@ -40,7 +40,7 @@ image = (
 )
 app = modal.App("garage-intelligence-novel-view", image=image)
 # Separate image for matting so rembg's dependencies can't disturb SEVA's pinned stack (numpy 1.24, torch 2.6).
-matte_image = modal.Image.debian_slim(python_version="3.11").pip_install("rembg[cpu]==2.0.67", "pillow")
+matte_image = modal.Image.debian_slim(python_version="3.11").pip_install("rembg[cpu]==2.0.67", "pillow", "numpy")
 vol = modal.Volume.from_name("gi-splats", create_if_missing=True)
 progress = modal.Dict.from_name("gi-progress", create_if_missing=True)
 DATA = pathlib.Path("/data")
@@ -73,12 +73,20 @@ def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, se
         vol.reload()
         root = DATA / "novel" / listing_id
         scene_src = root / "scene"
-        split_file = next(scene_src.glob("train_test_split_*.json"))
+        splits = sorted(scene_src.glob("train_test_split_*.json"))
+        if len(splits) != 1:
+            raise RuntimeError(f"expected exactly one train_test_split file, found {[p.name for p in splits]}")
+        split_file = splits[0]
         num_inputs = int(split_file.stem.rsplit("_", 1)[-1])
         split = json.loads(split_file.read_text())
         num_targets = len(split["test_ids"])
         meta = json.loads((scene_src / "transforms.json").read_text())
 
+        norm = normalize_inputs.remote(str(scene_src.relative_to(DATA)))
+        print("view normalization:", json.dumps(norm), flush=True)
+        (root / "logs").mkdir(parents=True, exist_ok=True)
+        (root / "logs" / "normalization.json").write_text(json.dumps(norm, indent=2))
+        vol.reload()
         work_in = pathlib.Path("/tmp/in")
         shutil.rmtree(work_in, ignore_errors=True)
         shutil.copytree(scene_src, work_in / "scene")
@@ -116,10 +124,15 @@ def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, se
         for f in posed_meta["frames"]:
             if len(f["transform_matrix"]) == 3:
                 f["transform_matrix"] = f["transform_matrix"] + [[0.0, 0.0, 0.0, 1.0]]
+        if len(posed_meta["frames"]) != len(meta["frames"]):
+            raise RuntimeError(f"SEVA returned {len(posed_meta['frames'])} frames, expected {len(meta['frames'])}")
+        # Input-only frames (regenerateReals) conditioned SEVA; reconstruction trains on the ring frames only.
+        # Output order = input order; sort the kept frames back into ring order (azimuth) for validation and training.
+        keep = sorted((i for i, f in enumerate(meta["frames"]) if not f.get("input_only")), key=lambda i: meta["frames"][i]["azimuth"])
+        posed_meta["frames"] = [posed_meta["frames"][i] for i in keep]
         (posed / "transforms.json").write_text(json.dumps(posed_meta, indent=2))
         frames = posed_meta["frames"]
-        if len(frames) != len(meta["frames"]):
-            raise RuntimeError(f"SEVA returned {len(frames)} frames, expected {len(meta['frames'])}")
+        meta["frames"] = [meta["frames"][i] for i in keep]
         # One image per azimuth for manual inspection (§8): frame order is preserved (sorted train+test indices).
         generated = root / "generated"
         shutil.rmtree(generated, ignore_errors=True)
@@ -137,6 +150,62 @@ def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, se
     except Exception as e:
         _report(progress_key, "failed", message=str(e)[:300])
         raise
+
+
+def _project_bbox(c2w: list, fl: float, cx: float, cy: float, box: dict) -> tuple[float, float, float, float]:
+    """2D bbox (x0, y0, x1, y1) of the assumed vehicle box seen by an OpenGL camera (looks down -Z, +Y up)."""
+    import itertools
+
+    import numpy as np
+
+    w2c = np.linalg.inv(np.array(c2w, dtype=float))
+    pts = []
+    for x, y, z in itertools.product(*zip(box["min"], box["max"])):
+        X, Y, Z, _ = w2c @ np.array([x, y, z, 1.0])
+        pts.append((cx + fl * X / -Z, cy - fl * Y / -Z))
+    xs, ys = zip(*pts)
+    return float(min(xs)), float(min(ys)), float(max(xs)), float(max(ys))
+
+
+@app.function(image=matte_image, cpu=4, memory=8192, timeout=1800, volumes={str(DATA): vol})
+def normalize_inputs(scene_rel: str) -> list[dict]:
+    """Plan §4 "view normalization": cut each real photo out, scale and centre it so the vehicle's height matches the
+    assumed vehicle box projected through that slot's camera, on white. Listing photos are shot at different distances;
+    left alone, the truck changes size between neighbouring views and the splat smears trying to reconcile them."""
+    from PIL import Image
+    from rembg import new_session, remove
+
+    vol.reload()
+    root = DATA / scene_rel
+    t = json.loads((root / "transforms.json").read_text())
+    (root / "images_orig").mkdir(exist_ok=True)
+    session, report = new_session("isnet-general-use"), []
+    for f in t["frames"]:
+        if not f.get("file_path"):
+            continue
+        path = root / f["file_path"]
+        orig = root / "images_orig" / path.name
+        if not orig.exists():
+            shutil.copy(path, orig)
+        with Image.open(orig) as im:
+            cut = remove(im.convert("RGB"), session=session)
+        bbox = cut.getchannel("A").point(lambda a: 255 if a > 128 else 0).getbbox()
+        if not bbox:
+            report.append({"azimuth": f["azimuth"], "skipped": "no vehicle found"})
+            continue
+        vehicle = cut.crop(bbox)
+        ex0, ey0, ex1, ey1 = _project_bbox(f["transform_matrix"], t["fl_x"], t["cx"], t["cy"], t["vehicle_box"])
+        k = (ey1 - ey0) / vehicle.height  # height is stable across azimuths; width depends on the exact angle
+        vehicle = vehicle.resize((max(1, round(vehicle.width * k)), max(1, round(vehicle.height * k))), Image.LANCZOS)
+        canvas = Image.new("RGB", (t["w"], t["h"]), "white")
+        ox = round((ex0 + ex1) / 2 - vehicle.width / 2)
+        oy = round(ey1 - vehicle.height)  # wheels on the projected ground line
+        canvas.paste(vehicle, (ox, oy), vehicle)
+        canvas.save(path)
+        # Plain Python numbers: the caller's container runs numpy 1.x and can't unpickle numpy 2 scalars.
+        report.append({"azimuth": int(f["azimuth"]), "scale": round(float(k), 3), "expected_h": int(round(float(ey1 - ey0))), "photo_h": int(bbox[3] - bbox[1])})
+    vol.commit()
+    return report
 
 
 @app.function(image=matte_image, cpu=4, memory=8192, timeout=1800, volumes={str(DATA): vol})

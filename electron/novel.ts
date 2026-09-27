@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import type { Generation, GenerationStage, ListingDetail, SplatPipeline } from "../src/data/types.ts";
-import { buildSplit, buildTransforms, EXTERIOR_LABELS, normalizeOverrides, planRing, RING, validatePosed, viewerScale, type Facing, type RingView } from "../src/data/novel.ts";
+import { buildSplit, buildTransforms, EXTERIOR_LABELS, normalizeOverrides, planRing, RING, ringFor, validatePosed, viewerScale, type Facing, type RingView } from "../src/data/novel.ts";
 import { pruneSplatFile } from "./ply.ts";
 
 // MVP quality bar (not photogrammetry-grade): 7k Splatfacto iterations is ~half the GPU time of the 15k default and
@@ -42,6 +42,13 @@ async function gi(d: Deps, ...args: string[]): Promise<any> {
 }
 
 // This laptop's network drops long transfers; retry volume copies a few times.
+// `modal volume put` overwrites but never deletes, so a re-run would inherit stale files (e.g. an old
+// train_test_split_5.json next to a new _7). Clear the remote dir first; a missing dir is fine.
+async function volumeReplace(d: Deps, local: string, remote: string) {
+  await run(d, "uvx", ["modal", "volume", "rm", "-r", "gi-splats", remote], 120_000).catch(() => undefined);
+  await volume(d, "put", local, remote);
+}
+
 async function volume(d: Deps, op: "put" | "get", a: string, b: string) {
   for (let attempt = 1; ; attempt++) {
     try {
@@ -120,7 +127,8 @@ export async function prep(d: Deps, listingId: string) {
   }
 
   // 3. Ring plan and cameras. SEVA reads intrinsics at the image's native size, so scene images match the ring resolution.
-  let views: RingView[] = planRing(usable, facing, overrides);
+  const ring = ringFor(overrides);
+  let views: RingView[] = planRing(usable, facing, overrides, ring);
   for (const v of views) if (v.source === "real") {
     fs.writeFileSync(path.join(dir, "scene", v.file), crops.get(v.sourceImageId!)!.resize({ width: RING.w, height: RING.h, quality: "best" }).toPNG());
   }
@@ -128,14 +136,14 @@ export async function prep(d: Deps, listingId: string) {
   views = views.map((v) => (v.source === "generated" ? { ...v, conditionedOn: realFiles } : v));
   if (realFiles.length < 3) throw new Error(`needs at least 3 usable exterior photos (front, 3/4, side, rear); found ${realFiles.length}`);
 
-  const transforms = buildTransforms(views);
-  const split = buildSplit(views);
+  const transforms = buildTransforms(views, ring, !!overrides.regenerateReals);
+  const split = buildSplit(views, !!overrides.regenerateReals);
   fs.writeFileSync(path.join(dir, "scene", "transforms.json"), JSON.stringify(transforms, null, 2));
   fs.writeFileSync(path.join(dir, "scene", `train_test_split_${split.train_ids.length}.json`), JSON.stringify(split, null, 2));
   fs.writeFileSync(path.join(dir, "poses", "transforms.json"), JSON.stringify(transforms, null, 2));
   const manifest = {
     listingId, title: listing.listingTitle, secondaryId: listing.secondaryId, createdAt: new Date().toISOString(),
-    ring: RING, facing, overrides,
+    ring, facing, overrides,
     assumptions: ["all photos share one camera distance, height and a 60° horizontal FOV", "front faces +X, driver side +Z (officer side -Z)"],
     rejected, views,
   };
@@ -191,10 +199,10 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
         if (!d.renderRing) throw new Error("ring renderer unavailable");
         fs.mkdirSync(path.join(dir, "test", "images"), { recursive: true });
         await d.renderRing(g.listingId, path.join(dir, "test"));
-        await volume(d, "put", path.join(dir, "test"), posedDir);
+        await volumeReplace(d, path.join(dir, "test"), posedDir);
       } else {
         const m = await prep(d, g.listingId);
-        await volume(d, "put", path.join(dir, "scene"), `${remote}/scene`);
+        await volumeReplace(d, path.join(dir, "scene"), `${remote}/scene`);
         const unsure = ((m.facing as { uncertain?: string[] }).uncertain ?? []).filter((l) => !(l in (m.overrides.labels ?? {})));
         if (unsure.length) update(d, g, { message: `Side unknown for ${unsure.join(", ")}; assumed from the other photos (pin in azimuths.json)` });
       }
@@ -205,7 +213,7 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
         update(d, g, { stage: "generating_views", current: undefined, total: undefined, message: "Checking view-generator access" });
         const access = (await gi(d, "check")).seva as string; // cheap CPU call: never start an H100 just to hit a 403
         if (!access.startsWith("ok")) throw new Error("View generator license not accepted yet: accept it at huggingface.co/stabilityai/stable-virtual-camera with the Hugging Face account whose token is in Modal, then Retry");
-        update(d, g, { current: 0, total: 24 - realCount(dir), message: "Starting view generator" });
+        update(d, g, { current: 0, total: ringCount(dir) - realCount(dir), message: "Starting view generator" });
         update(d, g, { calls: { ...g.calls, views: (await gi(d, "spawn-views", g.listingId, g.id)).callId } });
       }
       await pollCall(d, g, g.calls.views!, "generating_views");
@@ -221,7 +229,7 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
       fs.mkdirSync(path.join(dir, "poses"), { recursive: true });
       const local = path.join(dir, "poses", "posed-transforms.json");
       await volume(d, "get", `${posedDir}/transforms.json`, local);
-      const errors = validatePosed(JSON.parse(fs.readFileSync(local, "utf8")), 24);
+      const errors = validatePosed(JSON.parse(fs.readFileSync(local, "utf8")), g.pipeline === "posed-test" ? 24 : ringCount(dir));
       if (errors.length) throw new Error(`camera poses invalid: ${errors.slice(0, 3).join("; ")}`);
       update(d, g, { done: { ...g.done, cameras: true } });
     }
@@ -229,7 +237,7 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
       const job = `novel-${g.listingId.slice(0, 8)}-${g.id}`;
       if (!g.calls.splat) {
         update(d, g, { stage: "reconstructing", current: 0, total: ITERATIONS, message: undefined });
-        update(d, g, { calls: { ...g.calls, splat: (await gi(d, "spawn-splat", job, posedDir.slice(1), g.id, "24", "A10G", String(ITERATIONS))).callId } });
+        update(d, g, { calls: { ...g.calls, splat: (await gi(d, "spawn-splat", job, posedDir.slice(1), g.id, String(g.pipeline === "posed-test" ? 24 : ringCount(dir)), "A10G", String(ITERATIONS))).callId } });
       }
       const result = await pollCall(d, g, g.calls.splat!, "reconstructing");
       update(d, g, { stage: "exporting", current: undefined, total: undefined, message: `Downloading splat (${Math.round((result?.ply_bytes ?? 0) / 1e6)} MB)` });
@@ -248,6 +256,14 @@ export async function drive(d: Deps, g: Generation, stopAfter?: "views") {
     update(d, g, { stage: "failed", error: (e as Error).message.slice(0, 400) });
   }
   return g;
+}
+
+function ringCount(dir: string): number {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")).views.length;
+  } catch {
+    return 24;
+  }
 }
 
 function realCount(dir: string) {
