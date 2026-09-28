@@ -107,6 +107,22 @@ export async function smoke(win: BrowserWindow, out: string, query: string) {
           resolve({ frames: dts.length, fps: +(dts.length / 6).toFixed(1), p50ms: q(0.5), p95ms: q(0.95), maxms: q(1), angle: document.querySelector('.spin-badge')?.textContent }); } };
       requestAnimationFrame(tick);
     })`);
+    if (process.env.GI_SMOKE_SPIN_WALK) {
+      // Human-paced lap: start at Front, scroll 1 deg per frame (small trackpad deltas), stop and screenshot every
+      // GI_SMOKE_SPIN_WALK degrees, like someone turning the truck slowly and looking.
+      const every = Number(process.env.GI_SMOKE_SPIN_WALK);
+      fs.mkdirSync(path.join(out, "walk"), { recursive: true });
+      await js(`[...document.querySelectorAll('.hud button')].find((b) => b.textContent === 'Front')?.click()`);
+      await wait(2000);
+      for (let deg = 0, i = 0; deg < 360; deg += every, i++) {
+        if (deg > 0) await js(`new Promise((resolve) => { const el = document.querySelector('.spin'); let left = ${every};
+          const f = () => { el.dispatchEvent(new WheelEvent('wheel', { deltaX: 4 * Math.min(1, left), bubbles: true, cancelable: true })); left -= 1; left > 0 ? requestAnimationFrame(f) : resolve(true); };
+          requestAnimationFrame(f); })`);
+        await wait(250); // let in-betweens around the new angle decode, as they would for a person pausing
+        fs.writeFileSync(path.join(out, "walk", `${String(i).padStart(3, "0")}.png`), (await win.webContents.capturePage()).toPNG());
+      }
+      console.log("WALK " + JSON.stringify(await js(`({ ...document.querySelector('.spin').dataset, badge: document.querySelector('.spin-badge')?.textContent })`)));
+    }
     console.log("SPIN WHEEL " + JSON.stringify(wheel) + " " + JSON.stringify(await js(`({ ...document.querySelector('.spin').dataset })`)));
     return;
   }

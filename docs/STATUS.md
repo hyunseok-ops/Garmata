@@ -1,30 +1,77 @@
 # Garage Intelligence — Development Status
 
-Date: 2026-09-27 (plan v2: docs/PLAN.md; the mesh-era plan is archived as docs/PLAN-v1-mesh.md)
+Date: 2026-09-27. Plan: docs/PLAN.md (novel-view 360). Latest commit on main.
 
-## Where the MVP stands
+## Current direction: Photo Spin
+The priority moved from a free-orbit Gaussian splat to a **photo spin**: a smooth 360° turntable of images with the real
+background, where every angle the listing actually photographed shows that photo unmodified, and AI fills the angles in between.
+The splat pipeline still exists (v10 is the best splat) but is not the product path right now.
 
-| Phase (plan §40) | State |
-| --- | --- |
-| 1 Simplify UI | Done. Dashboard home (Active Generations, Ready for Review, Recent Listings), 360 View / Photos / Versions tabs, pipeline labels (Novel View Splat, Capture Splat, Pipeline Test, Legacy Mesh). Meshy generation removed. |
-| 2 Dataset prep | Done. `GI_NOVEL_PREP`: one photo per exterior label, resize/crop, facing detection (SIFT, conservative) + `azimuths.json` override, 24-slot ring, manifest. Verified on three pumpers. |
-| 3 Novel views | Built and deployed (Stable Virtual Camera on Modal H100 + rembg matting). **Blocked: model license not accepted** on the Hugging Face account behind the Modal secret. |
-| 4 Pose generator | Done and tested (`src/data/novel.ts`). OpenGL cameras, front +X, driver side +Z, shared by SEVA, Splatfacto and three.js. |
-| 5 Posed Splatfacto | Done. Posed-images mode with validation (frames, 4x4 matrices, sizes, ordering), no feature matching, 7k iterations, floater pruning on import. |
-| 6 Viewer integration | Verified with a pipeline test (existing model rendered from the ring cameras → splat): orientation, scale, all presets, real-photo matching correct. 95–120 fps while orbiting. |
-| 7 Dashboard progress | Done. Real stages from Modal (`gi-progress` Dict), iteration progress bar, step checklist, retry, resume after restart. |
-| 8 Evaluation | Not started: needs Phase 3 output on a real listing. |
+Pilot: 2009 Pierce Velocity Pumper (#226894). Best version: **v15** (Versions tab). Preview video: `~/Desktop/pierce-velocity-spin-v15.mp4`.
 
-## To unblock
-Accept the Stability AI Non-Commercial License at https://huggingface.co/stabilityai/stable-virtual-camera with the account behind
-Modal's `huggingface` secret (currently a teammate's account), or put your own token in that secret. Then Retry the Pierce Velocity
-card on the dashboard (scene already uploaded). Check access: `uvx --from modal==1.5.5 python pipeline/gi.py check`.
-Note the license is non-commercial: fine for the MVP experiment; production use needs a commercial license or another model.
+## How a spin is built
+1. **Pick and place real photos** (`azimuths.json` in `experiments/novel-view/<listingId>/`). Listing labels are unreliable
+   (front-3/4 shots labelled "front", rear-3/4 labelled "side", no left/right), so photos are pinned to ring angles: automatically by
+   matching each photo to an earlier lap (truck-only SIFT, mirrored for the side the lap never saw), by eye where that fails.
+2. **Generate a 48-view lap** (7.5° steps, 1024×768) with Stable Virtual Camera on Modal H100, conditioned on the pinned photos,
+   backgrounds kept. Inputs are pose-normalised (camera moved along its ray so the truck size matches the ring) instead of shrunk.
+   16 inputs uses SEVA's orbit prior + nearest-gt chunking (its plain path crashes at ≥9 inputs). ~20 min per run.
+3. **Assemble the spin** (`pipeline/spin_build.py`, `GI_SPIN_BUILD`): real photos are placed at their angles as plain crops (never
+   composited); generated frames zoom to meet their framing; a size check drops real frames whose truck is >12% off its neighbours;
+   frames flagged in `spinReplace` are replaced by an optical-flow midpoint; RIFE adds 3 in-betweens per gap → 192 frames.
+4. **Viewer** (`src/viewer/SpinViewer.tsx`): drag with momentum, trackpad/wheel, arrow keys, presets, real/AI badge, projected tags.
+   Key frames stay decoded; in-betweens decode off-thread in a window around the current angle (~70 of 192 in memory).
+   120 fps while scrolling (p95 ≈ 9.8 ms).
+
+## What's weak (from a slow manual scroll through v15, screenshot every 3.75°)
+**The truck in AI angles**
+- **Driver-side front, ~0–60°** is the weakest stretch: the listing has no photo between 37.5° and 82.5° on that side.
+  - 4–26°: the far side of the body ghosts (a doubled outline behind the truck).
+  - 41°: cab front smeared.
+  - 56–64°: the cab is a smeared blur. 60° itself was AI-broken (doubled wheels) and is an optical-flow blend.
+- **Rear, 184–206°**: a brown smear band in the background behind the truck; at 195–206° the truck looks stretched, cab and rear
+  both visible, with doubled rear wheels at 206°.
+- **Small ghost wheels / smudges** under the body at 150–165°, 236–247°.
+- **Trees at the top of the frame** smear in several places (26°, 60–75°, 116°, 146°).
+
+**Framing**
+- **Zoom pulses** around the real-photo cluster (300–341°). Real frames at 307.5°, 315°, 330° have their own framing, and the AI frames
+  between them zoom in and out to meet them, so the truck breathes in size.
+- **Truck is cropped** at the right edge from ~285° to ~341° (rear of the body cut off) because of that zoom.
+- **Jumps** at 247→251° and 266→270° (truck position/size shift).
+- **Truck grows toward the front** (0–30° framed tighter than 352°).
+
+**Tags (template positions, not per truck)**
+- **Wrong spots.** "Pump Panel" sits on the cab front at 319–0°; the pump panel is on the side. "Engine" and "Rear" float in empty
+  space beside the truck (e.g. Engine left of the cab at 270–311°, Rear right of the truck at 210–251°) and get clipped at the edges.
+- **Overlap.** "Rear" and "Compartments" overlap at 184–206°.
+
+**App / UX**
+- **Stuck "Generating" state.** Dashboard shows a paused job as "Generating intermediate views" forever, with an internal file path as
+  its message. The listing header shows the same and a disabled "Generating..." button, so a new generation can't be started from
+  the app.
+- **Indistinguishable cards.** "Ready for review" has four identical "Novel View Splat" cards plus a pipeline test; spin cards have no
+  listing number and no thumbnail, and nothing says v15 is the good one.
+- **Wasted space.** The spin uses about half the viewport height; dark bands above and below.
+- **Blank thumbnail.** The listing thumbnail in the 3D Listings list is empty.
+- **Only 8 real photos** in the spin (of 16 inputs): the size check dropped 3 and 5 close-ups need too much zoom.
+
+**Process**
+- **Per-listing hand work.** Photo angles needed manual fixes (one photo was on the wrong side). Each listing needs a review pass.
+- **Silent drift.** Registration against an AI lap is circular: where the lap is wrong, photos don't match it.
+
+## Next steps (suggested order)
+1. **Real camera poses** from structure-from-motion on the listing's exterior photos (parking-lot texture should work). This
+   replaces label guesses and eyeballing, fixes side mix-ups, and gives SEVA true distances/heights: the biggest quality lever.
+2. **Tags** placed per truck (click-to-place in the spin, or project from the pose model) instead of the pumper template.
+3. **Framing pass**: normalise truck height per frame from the matte, so real and AI frames share one scale and nothing is cropped.
+4. **UX fixes**: close paused jobs, card thumbnails + version labels, fill the viewport.
+5. **Photo capture guidance** for sellers: two driver-side 3/4 shots would remove the weakest stretch outright.
 
 ## Known limits
-- Facing detection answers "unknown" when photos don't share enough features; unknowns follow the majority. A vision-model check is the robust fix.
-- Real photos are assumed to share one camera distance, height and FOV.
-- Deferred per plan §39: Garage backend branch (built earlier, local only), Clerk keys, Supabase bucket, packaging polish.
+- SEVA license is non-commercial (fine for this experiment). Weights via Modal secret `gi-huggingface`; deploy with `GI_HF_SECRET=gi-huggingface`.
+- RIFE (frame interpolation) runs locally from `~/.cache/gi/rife-ncnn-vulkan-20221029-macos`; without it the spin has 48 frames.
+- A React "removeChild" console error appears on every app run (pre-existing, not from the spin).
 
 ## Earlier status (mesh era, kept for history)
 
