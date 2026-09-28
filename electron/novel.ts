@@ -160,7 +160,7 @@ export async function prep(d: Deps, listingId: string) {
   views = views.map((v) => (v.source === "generated" ? { ...v, conditionedOn: realFiles } : v));
   if (realFiles.length < 3) throw new Error(`needs at least 3 usable exterior photos (front, 3/4, side, rear); found ${realFiles.length}`);
 
-  const transforms = buildTransforms(views, ring, !!overrides.regenerateReals, !!overrides.keepBackground);
+  const transforms = { ...buildTransforms(views, ring, !!overrides.regenerateReals, !!overrides.keepBackground), ...(overrides.seed != null ? { seva_seed: overrides.seed } : {}) };
   const split = buildSplit(views, !!overrides.regenerateReals);
   fs.writeFileSync(path.join(dir, "scene", "transforms.json"), JSON.stringify(transforms, null, 2));
   fs.writeFileSync(path.join(dir, "scene", `train_test_split_${split.train_ids.length}.json`), JSON.stringify(split, null, 2));

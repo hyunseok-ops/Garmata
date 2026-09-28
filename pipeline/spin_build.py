@@ -116,6 +116,15 @@ INTERP = 4  # in-between frames per gap (x4: 7.5 deg lap -> 1.875 deg steps)
 RIFE_DIR = pathlib.Path(os.environ.get("GI_RIFE_DIR", pathlib.Path.home() / ".cache/gi/rife-ncnn-vulkan-20221029-macos"))
 
 
+def midpoint(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    with tempfile.TemporaryDirectory() as tmp:
+        t = pathlib.Path(tmp)
+        Image.fromarray(a).save(t / "a.png"), Image.fromarray(b).save(t / "b.png")
+        subprocess.run([str(RIFE_DIR / "rife-ncnn-vulkan"), "-0", str(t / "a.png"), "-1", str(t / "b.png"), "-o", str(t / "m.png"),
+                        "-m", str(RIFE_DIR / "rife-v4.6"), "-s", "0.5"], check=True, capture_output=True)
+        return np.array(Image.open(t / "m.png").convert("RGB"))
+
+
 def interpolate(out_dir: pathlib.Path, frames: list[dict], factor: int) -> list[dict]:
     """Optical-flow in-betweens (RIFE v4.6, local GPU) so a slow spin never shows two frames blended. Key frames
     are copied through untouched (real photos stay the photo); in-betweens are marked "interpolated". Without the
@@ -161,6 +170,12 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
     azimuths = [float(v["azimuth"]) for v in manifest["views"]]
     assert len(azimuths) == len(frames), f"{len(frames)} generated frames for {len(azimuths)} ring slots"
     gen = [np.array(Image.open(p).convert("RGB")) for p in frames]
+    # Reviewed-bad generated frames (azimuths.json "spinReplace": [azimuth, ...]) are replaced by the optical-flow
+    # midpoint of their neighbours instead of being shown.
+    overrides = json.loads((exp_dir / "azimuths.json").read_text()) if (exp_dir / "azimuths.json").exists() else {}
+    replaced = [azimuths.index(float(a)) for a in overrides.get("spinReplace", []) if float(a) in azimuths]
+    for slot in replaced:
+        gen[slot] = midpoint(gen[(slot - 1) % len(gen)], gen[(slot + 1) % len(gen)])
     gw = gen[0].shape[1]
     cache = exp_dir / "candidates"
     cache.mkdir(exist_ok=True)
@@ -268,7 +283,7 @@ def main(exp_dir: pathlib.Path, candidates_path: pathlib.Path, out_dir: pathlib.
                 base = Image.fromarray(gen[slot]).resize((OUT_W, OUT_H), Image.LANCZOS, box=box)
             name = f"{slot:03d}.jpg"
             base.save(frames_dir / name, quality=88)
-            out_frames.append({"azimuth": az, "file": f"frames/{name}", "source": "real" if pid else "generated", "sourceImageId": pid,
+            out_frames.append({"azimuth": az, "file": f"frames/{name}", "source": "real" if pid else "interpolated" if slot in replaced else "generated", "sourceImageId": pid,
                                "view": [round(view[0], 4), round(view[1], 2), round(view[2], 2)]})  # zoom, centre in ring px
         return out_frames
 

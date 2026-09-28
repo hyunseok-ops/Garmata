@@ -104,7 +104,7 @@ def generate_views(listing_id: str, progress_key: str = "", cfg: float = 2.0, se
         threading.Thread(target=watch, daemon=True).start()
         cmd = ["python", "demo.py", "--data_path", str(work_in), "--data_items", "scene", "--task", "img2img",
                "--num_inputs", str(num_inputs), "--H", str(meta["h"]), "--W", str(meta["w"]), "--cfg", str(cfg),
-               "--seed", str(seed), "--video_save_fps", "10"]
+               "--seed", str(meta.get("seva_seed", seed)), "--video_save_fps", "10"]
         if num_inputs >= 9:
             # Semi-dense inputs: SEVA's plain chunking crashes here (T becomes [first, second] pass lengths), and its
             # docs recommend the orbit trajectory prior + nearest-gt chunking for object-centric orbits anyway.
